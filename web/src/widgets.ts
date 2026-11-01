@@ -25,6 +25,7 @@ export const WIDGET_KINDS: WidgetKind[] = [
   'map',
   'navmap',
   'compass',
+  'routedraw',
 ];
 
 // Inspector-only list: deliberately omits 'pace' (valid in templates, never offered here).
@@ -65,6 +66,7 @@ const DEFAULT_METRIC: Record<WidgetKind, MetricId> = {
   map: 'none',
   navmap: 'none',
   compass: 'none',
+  routedraw: 'none',
 };
 
 export function defaultMetricFor(kind: WidgetKind): MetricId {
@@ -113,6 +115,7 @@ const KIND_CAPS: Record<WidgetKind, KindCaps> = {
   map: { ...DEFAULT_CAPS, unit: false, labelToggle: false, trailWidth: true, text: false },
   navmap: { ...DEFAULT_CAPS, unit: false, labelToggle: false, trailWidth: true, text: false },
   compass: { ...DEFAULT_CAPS, unit: false, labelToggle: false },
+  routedraw: { ...DEFAULT_CAPS, unit: false, labelToggle: false, trailWidth: true, text: false },
 };
 
 export const capsFor = (kind: WidgetKind): KindCaps => KIND_CAPS[kind];
@@ -134,6 +137,7 @@ const BASE_SIZE: Record<WidgetKind, { w: number; h: number }> = {
   map: { w: 46, h: 34 },
   navmap: { w: 46, h: 34 },
   compass: { w: 28, h: 26 },
+  routedraw: { w: 60, h: 40 },
 };
 
 /**
@@ -159,6 +163,16 @@ export function nextWidgetId(taken: Iterable<string>, kind: WidgetKind): string 
   let n = 2;
   while (set.has(`${kind}-${n}`)) n += 1;
   return `${kind}-${n}`;
+}
+
+/**
+ * Share frame size: cap the long edge at 1080p so phone photos don't blow up
+ * preview canvas or encode time, then snap to even dims for H.264.
+ */
+export function fitShareSize(w: number, h: number): { w: number; h: number } {
+  const scale = Math.min(1, 1920 / Math.max(w, h));
+  const even = (n: number): number => Math.max(2, Math.round((n * scale) / 2) * 2);
+  return { w: even(w), h: even(h) };
 }
 
 /** Map stroke widths in px: explicit `strokeWidth` wins (full trail at 70 %), else auto from the box. */

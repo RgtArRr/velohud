@@ -62,6 +62,11 @@ export interface OverlayHistory {
   t: number;
 }
 
+/** Share animation state: 0..1 progress over the anim window. */
+export interface ShareAnim {
+  progress: number;
+}
+
 type Ctx = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
 
 interface ResolvedStyle {
@@ -1093,6 +1098,74 @@ function drawCompass(
   ctx.restore();
 }
 
+/** Share route: faint full track with the accent trail drawing on over the anim window. */
+function drawRouteDraw(
+  ctx: Ctx,
+  widget: WidgetDef,
+  template: Template,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  hist: OverlayHistory | undefined,
+  progress: number,
+): void {
+  const style = resolveStyle(template, widget);
+  paintPanel(ctx, x, y, w, h, style.shape, style.background, style.backgroundOpacity);
+  const pts: [number, number, number][] = hist ? collectGpsPts(hist.activity.samples) : [];
+  if (pts.length < 2) return;
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const [lon, lat] of pts) {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  const kx = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
+  const spanLon = Math.max(1e-9, (maxLon - minLon) * kx);
+  const spanLat = Math.max(1e-9, maxLat - minLat);
+  const pad = Math.min(w, h) * 0.1;
+  const scale = Math.min((w - pad * 2) / spanLon, (h - pad * 2) / spanLat);
+  const X = (lon: number): number => x + w / 2 + ((lon - (minLon + maxLon) / 2) * kx * scale);
+  const Y = (lat: number): number => y + h / 2 - ((lat - (minLat + maxLat) / 2) * scale);
+  const { track: trackW, ridden: riddenW } = mapStrokeWidths(widget.strokeWidth, w, h);
+  const path = (upto: number): void => {
+    ctx.beginPath();
+    for (let i = 0; i < upto; i++) {
+      if (i === 0) ctx.moveTo(X(pts[i][0]), Y(pts[i][1]));
+      else ctx.lineTo(X(pts[i][0]), Y(pts[i][1]));
+    }
+  };
+  ctx.save();
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#ffffff';
+  ctx.globalAlpha = 0.25;
+  ctx.lineWidth = trackW;
+  path(pts.length);
+  ctx.stroke();
+  const drawn = Math.floor(pts.length * Math.min(1, Math.max(0, progress)));
+  if (drawn >= 2) {
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = style.accent;
+    ctx.lineWidth = riddenW;
+    path(drawn);
+    ctx.stroke();
+    const [hx, hy] = pts[drawn - 1];
+    ctx.fillStyle = style.accent;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(X(hx), Y(hy), riddenW, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 /** Paints every visible widget of the template over the current frame. */
 export function drawOverlay(
   ctx: Ctx,
@@ -1102,6 +1175,7 @@ export function drawOverlay(
   frameH: number,
   units: Units,
   hist?: OverlayHistory,
+  share?: ShareAnim,
 ): void {
   for (const widget of template.widgets) {
     if (!widget.visible) continue;
@@ -1150,6 +1224,9 @@ export function drawOverlay(
         break;
       case 'compass':
         drawCompass(ctx, widget, template, sample, x, y, w, h, units, hist);
+        break;
+      case 'routedraw':
+        if (share) drawRouteDraw(ctx, widget, template, x, y, w, h, hist, share.progress);
         break;
       default:
         drawStat(ctx, widget, template, sample, x, y, w, h, units);

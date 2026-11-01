@@ -38,6 +38,7 @@ import {
   WIDGET_KINDS,
   capsFor,
   defaultMetricFor,
+  fitShareSize,
   makeWidgetDef,
   kindLabel,
   kindShowsUnit,
@@ -225,6 +226,7 @@ const KINDS = new Set([
   'map',
   'navmap',
   'compass',
+  'routedraw',
 ]);
 const SHAPES = new Set(['rect', 'pill', 'none']);
 const ALIGNS = new Set(['left', 'center', 'right']);
@@ -442,17 +444,25 @@ assert.equal(resolveVideoInstant(WALL, 0), WALL);
 for (const k of ['stat', 'number', 'gauge', 'speedo', 'ring', 'slope', 'gears', 'spark', 'profile', 'profilenext', 'vam']) {
   assert.equal(kindShowsUnit(k), true, `unit ${k}`);
 }
-for (const k of ['map', 'navmap', 'compass']) {
+for (const k of ['map', 'navmap', 'compass', 'routedraw']) {
   assert.equal(kindShowsUnit(k), false, `unit ${k}`);
 }
 // Capability table per kind (drives inspector visibility).
 const LABEL_TOGGLE = ['stat', 'gauge', 'speedo', 'slope', 'spark', 'profile', 'profilenext', 'vam', 'ring', 'gears'];
 for (const k of WIDGET_KINDS) {
   assert.equal(capsFor(k).labelToggle, LABEL_TOGGLE.includes(k), `caps labelToggle ${k}`);
-  assert.equal(capsFor(k).trailWidth, k === 'map' || k === 'navmap', `caps trailWidth ${k}`);
-  assert.equal(capsFor(k).text, k !== 'map' && k !== 'navmap', `caps text ${k}`);
+  assert.equal(capsFor(k).trailWidth, k === 'map' || k === 'navmap' || k === 'routedraw', `caps trailWidth ${k}`);
+  assert.equal(capsFor(k).text, k !== 'map' && k !== 'navmap' && k !== 'routedraw', `caps text ${k}`);
   assert.equal(capsFor(k).gearsMode, k === 'gears', `caps gearsMode ${k}`);
 }
+
+// Share route card: frame sizing for still-image renders.
+assert.deepEqual(fitShareSize(6000, 4000), { w: 1920, h: 1280 });
+assert.deepEqual(fitShareSize(720, 1280), { w: 720, h: 1280 });
+assert.ok(fitShareSize(721, 1281).w % 2 === 0, 'share snaps even');
+const shareTpl = parseTemplateJson(readFileSync(join(root, 'fixtures/templates/share.json'), 'utf8'));
+assert.equal(shareTpl.widgets.length, 1, 'share ships only the route');
+assert.equal(shareTpl.widgets[0].kind, 'routedraw');
 
 // profilenext window: dot ~0.5 km ahead of the rendered start, 5 min ahead at right.
 const winSamples = [];
@@ -967,4 +977,9 @@ assert.ok(
 );
 assert.ok(appSrc.includes(`lastLiveSig = ''`), 'font arrival resets the live paint gate');
 
-console.log(`check passed: fit(120 samples) + aspects + ${files.length} templates + mvhd + widgets + catalog(${kindValues.length} kinds) + profwin + i18n + tpljson + seo(${locs.length} urls) + fontgate`);
+// Share context derives from the clips, never from a URL flag: attaching an
+// image is what switches kinds/cards/preview, so no query param can desync it.
+assert.ok(!appSrc.includes('SHARE_ENABLED'), 'no share url flag');
+assert.ok(appSrc.includes(`activeClip()?.source === 'image'`), 'image context reads the active clip');
+
+console.log(`check passed: fit(120 samples) + aspects + ${files.length} templates + mvhd + widgets + catalog(${kindValues.length} kinds) + profwin + i18n + tpljson + seo(${locs.length} urls) + fontgate + share`);

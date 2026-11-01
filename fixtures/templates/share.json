@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 3,
+  "id": "share",
+  "name": "Share",
+  "description": "Ruta animada sobre foto.",
+  "theme": {
+    "text": "#ffffff",
+    "accent": "#ffffff",
+    "panel": "#0b0e11",
+    "panelOpacity": 0
+  },
+  "widgets": [
+    {
+      "id": "route",
+      "metric": "none",
+      "kind": "routedraw",
+      "visible": true,
+      "layout": {
+        "ax": "center",
+        "ay": "center",
+        "px": 0,
+        "py": -6,
+        "w": 76,
+        "h": 34
+      }
+    }
+  ]
+}

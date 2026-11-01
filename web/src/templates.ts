@@ -16,6 +16,7 @@ import vam from '../../fixtures/templates/vam.json';
 import routemap from '../../fixtures/templates/routemap.json';
 import navmap from '../../fixtures/templates/navmap.json';
 import compass from '../../fixtures/templates/compass.json';
+import share from '../../fixtures/templates/share.json';
 import { parseTemplateJson, type Template } from '@velohud/shared';
 
 /** Built-in catalog. Fase 6+ adds generated ones. */
@@ -38,6 +39,7 @@ const RAW_TEMPLATES: unknown[] = [
   routemap as Template,
   navmap as Template,
   compass as Template,
+  share as Template,
 ];
 
 /** Build-time fixtures are trusted, but a corrupt JSON must fail loud, never silent. */

@@ -32,7 +32,8 @@ export type WidgetKind =
   | 'vam'
   | 'map'
   | 'navmap'
-  | 'compass';
+  | 'compass'
+  | 'routedraw';
 
 export type PanelShape = 'rect' | 'pill' | 'none';
 export type TextAlign = 'left' | 'center' | 'right';
@@ -48,6 +49,7 @@ export const WIDGET_KINDS: readonly WidgetKind[] = [
   'spark',
   'profile',
   'profilenext',
+  'routedraw',
   'vam',
   'map',
   'navmap',

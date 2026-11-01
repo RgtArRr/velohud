@@ -16,6 +16,7 @@ import {
 } from 'mediabunny';
 import type { Template } from '@velohud/shared';
 import { sampleAt, type Activity } from './telemetry.js';
+import { fitShareSize } from './widgets.js';
 import { drawOverlay } from './overlay.js';
 import { t } from './i18n.js';
 import type { Units } from './format.js';
@@ -166,5 +167,84 @@ export async function renderVideo(options: RenderOptions): Promise<Blob | null> 
     return null;
   } finally {
     input.dispose();
+  }
+}
+
+export interface RenderImageOptions {
+  /** Image bytes (PNG/JPEG/WebP). */
+  file: Blob;
+  activity: Activity;
+  template: Template;
+  units: Units;
+  /** Count-up + route draw window; after it the frame holds static. */
+  animSec: number;
+  /** Total video length in seconds. */
+  totalSec: number;
+  saveStream?: FileSystemWritableFileStream;
+  canvas?: HTMLCanvasElement;
+  onProgress?: (renderedSec: number, totalSec: number) => void;
+}
+
+/**
+ * Share render: a static image with animated totals drawn over a synthetic
+ * 30 fps clock. No decode, no audio, no trim: `animSec` drives the count-up
+ * and the route draw-on, the rest of `totalSec` holds the finished frame.
+ */
+export async function renderImage(options: RenderImageOptions): Promise<Blob | null> {
+  const anim = Math.min(Math.max(options.animSec, 0.5), options.totalSec);
+  const total = Math.max(options.totalSec, 1);
+  const bitmap = await createImageBitmap(options.file);
+  try {
+    const { w: frameW, h: frameH } = fitShareSize(bitmap.width, bitmap.height);
+    const canvas = options.canvas ?? document.createElement('canvas');
+    canvas.width = frameW;
+    canvas.height = frameH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error(t('err.noCanvas'));
+
+    const saveStream = options.saveStream ?? null;
+    const target =
+      saveStream === null
+        ? new BufferTarget()
+        : new StreamTarget(saveStream, { chunked: true });
+    const output = new Output({
+      format: new Mp4OutputFormat({ fastStart: saveStream === null ? 'in-memory' : false }),
+      target,
+    });
+    const canvasSource = new CanvasSource(canvas, { codec: 'avc', quality: new Quality('high') });
+    output.addVideoTrack(canvasSource);
+    await output.start();
+
+    const FPS = 30;
+    const frames = Math.max(1, Math.round(total * FPS));
+    const endT = options.activity.durationSec;
+    const endSample = sampleAt(options.activity, endT);
+    for (let f = 0; f < frames; f += 1) {
+      const tSec = f / FPS;
+      const progress = Math.min(1, tSec / anim);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(bitmap, 0, 0, frameW, frameH);
+      drawOverlay(
+        ctx,
+        options.template,
+        endSample,
+        frameW,
+        frameH,
+        options.units,
+        { activity: options.activity, t: endT },
+        { progress },
+      );
+      await canvasSource.add(tSec, 1 / FPS);
+      options.onProgress?.(tSec, total);
+    }
+
+    await output.finalize();
+    if (target instanceof BufferTarget) {
+      if (!target.buffer) throw new Error(t('err.noOutput'));
+      return new Blob([target.buffer], { type: 'video/mp4' });
+    }
+    return null;
+  } finally {
+    bitmap.close();
   }
 }

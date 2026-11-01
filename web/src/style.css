@@ -1011,6 +1011,14 @@ a {
   margin-bottom: 12px;
 }
 
+.render-share {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .template-cards {
   display: flex;
   flex-wrap: nowrap;

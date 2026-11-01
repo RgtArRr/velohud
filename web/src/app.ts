@@ -40,7 +40,7 @@ import {
   type VideoZone,
 } from './video-meta.js';
 import { drawOverlay } from './overlay.js';
-import { renderVideo } from './render.js';
+import { renderImage, renderVideo } from './render.js';
 import { BUILTIN_TEMPLATES } from './templates.js';
 import {
   METRIC_IDS,
@@ -49,6 +49,7 @@ import {
   DEFAULT_WIDGET_FONT,
   defaultAlignFor,
   defaultMetricFor,
+  fitShareSize,
   kindLabel,
   makeWidgetDef,
   metricLabel,
@@ -175,6 +176,13 @@ interface Clip {
   trimEnd: number | null;
   includeAudio: boolean;
   status: 'listo' | 'renderizando' | 'hecho' | 'error';
+  /** Share flow: still images render animated totals over a synthetic clock. */
+  source: 'video' | 'image';
+  img: HTMLImageElement | null;
+  imgW: number;
+  imgH: number;
+  shareAnim: number;
+  shareTotal: number;
 }
 
 export async function renderApp(root: HTMLElement): Promise<void> {
@@ -197,6 +205,14 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     string,
     Map<string, { metric?: MetricId; kind?: WidgetKind; timeFormat?: TimeFormat; showUnit?: boolean; showLabel?: boolean; gearsMode?: GearsMode; gearsSide?: GearsSide }>
   >();
+  /** Share flow: active when the selected clip is a still image. Main video flow untouched. */
+  const SHARE_TEMPLATE_ID = 'share';
+  const isImageCtx = (): boolean => activeClip()?.source === 'image';
+  const SHARE_KINDS: WidgetKind[] = ['routedraw'];
+  let lastVideoTemplateId: string | null = null;
+  let shareT = 0;
+  let shareLast = 0;
+  let sharePlaying = true;
   /** Session-removed widget ids per template ("Restablecer widgets" brings them back). */
   const removedWidgets = new Map<string, Set<string>>();
   /** Bumped on any override change so thumbnails repaint (see repaintThumbs sig). */
@@ -960,7 +976,8 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   addLabel.hidden = true;
   const videoInput = el('input');
   videoInput.type = 'file';
-  videoInput.accept = 'video/mp4,.mp4,video/quicktime,.mov';
+  videoInput.accept =
+    'video/mp4,.mp4,video/quicktime,.mov,image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp';
   videoInput.multiple = true;
   const binDrop = el('div', 'bin-drop', t('bin.drop'));
   binDrop.setAttribute('role', 'button');
@@ -1299,7 +1316,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const cardAiBtn = mkCardIconBtn('card-ai', t('ai.improveTitle'), t('ai.improveTitle'), 'icon-sparkles', () =>
       openAdjustDialog(tpl),
     );
-    foot.append(exportBtn, cardAiBtn);
+    // The AI schema doesn't know share kinds: offering adjust would strip them.
+    foot.append(exportBtn);
+    if (tpl.id !== SHARE_TEMPLATE_ID) foot.appendChild(cardAiBtn);
     card.append(openBtn, foot);
     cardsBox.appendChild(card);
     thumbs.push({
@@ -1323,6 +1342,13 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   newCard.append(el('span', 'new-plus', '+'), el('span', 'template-name', t('tpl.new')));
   cardsBox.appendChild(newCard);
   for (const tpl of allTemplates()) addCard(tpl);
+  /** Image context shows only the share card; the share card hides everywhere else. */
+  const syncCardGate = (): void => {
+    const image = isImageCtx();
+    for (const th of thumbs) th.card.hidden = image ? th.template.id !== SHARE_TEMPLATE_ID : th.template.id === SHARE_TEMPLATE_ID;
+    newCard.hidden = image;
+  };
+  syncCardGate();
   /** Thumbnails mirror the loaded video's aspect so cards preview the real layout. */
   const sizeThumbs = (): void => {
     const dims =
@@ -1465,6 +1491,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       cardsBox.scrollLeft = 0;
     }
     syncCards();
+    syncCardGate();
     sizeThumbs();
     bumpRev();
     if (account && !cloudIds.has(tpl.id)) {
@@ -1955,6 +1982,23 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     TIME_FORMATS,
     'format-select',
   );
+  /** Image context offers only share kinds; video context hides them. */
+  const syncKindOptions = (): void => {
+    const image = isImageCtx();
+    const kinds = image ? SHARE_KINDS : WIDGET_KINDS.filter((k) => !SHARE_KINDS.includes(k));
+    for (const sel of [addKindSel, kindSel]) {
+      const prev = sel.value;
+      sel.innerHTML = '';
+      for (const k of kinds) {
+        const opt = el('option', undefined, kindLabel(k));
+        opt.value = k;
+        sel.appendChild(opt);
+      }
+      sel.value = (kinds as string[]).includes(prev) ? prev : kinds[0];
+    }
+    addMetricSel.value = defaultMetricFor(addKindSel.value as WidgetKind);
+  };
+  syncKindOptions();
   const unitRow = el('div', 'editor-row');
   const unitCheck = mkField(unitRow, t('w.unit'), 'checkbox', 'unit-check');
   const labelRow = el('div', 'editor-row');
@@ -2403,6 +2447,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       metricSel.appendChild(opt);
     }
     setIfIdle(metricSel, sw.widget.metric);
+    metricRow.hidden = sw.widget.kind === 'routedraw';
     fmtRow.hidden = sw.widget.metric !== 'elapsedTime';
     setIfIdle(fmtSel, sw.widget.timeFormat ?? 'auto');
     const caps = capsFor(sw.widget.kind);
@@ -2494,6 +2539,38 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   renderBtn.type = 'button';
   renderRow.appendChild(renderBtn);
   renderPanel.appendChild(renderRow);
+  // Share timing: animation window then static hold. Image context only.
+  const shareRow = el('div', 'render-share');
+  shareRow.hidden = true;
+  const mkShareInput = (labelText: string, initial: string): HTMLInputElement => {
+    const group = el('label', 'trim-group', labelText);
+    const input = el('input', 'trim-input');
+    input.type = 'number';
+    input.min = '0.5';
+    input.max = '60';
+    input.step = '0.5';
+    input.value = initial;
+    group.appendChild(input);
+    shareRow.appendChild(group);
+    return input;
+  };
+  const animInput = mkShareInput(t('r.anim'), '4');
+  const totalInput = mkShareInput(t('r.total'), '8');
+  const syncShareInputs = (which: 'anim' | 'total'): void => {
+    const clip = activeClip();
+    if (!clip || clip.source !== 'image') return;
+    const anim = Math.min(60, Math.max(0.5, Number(animInput.value) || 4));
+    const total = Math.min(60, Math.max(1, Number(totalInput.value) || 8));
+    // The animation window never outruns the video: clamp the edited field.
+    clip.shareAnim = which === 'anim' ? Math.min(anim, total) : Math.min(clip.shareAnim, total);
+    clip.shareTotal = which === 'total' ? Math.max(total, clip.shareAnim) : total;
+    animInput.value = String(clip.shareAnim);
+    totalInput.value = String(clip.shareTotal);
+    binMetaSig = '';
+  };
+  animInput.addEventListener('change', () => syncShareInputs('anim'));
+  totalInput.addEventListener('change', () => syncShareInputs('total'));
+  renderPanel.insertBefore(shareRow, renderRow);
   const progress = el('progress', 'render-progress');
   progress.max = 1;
   progress.value = 0;
@@ -2617,6 +2694,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       th.sig = sig;
       th.ctx.fillStyle = '#0d0d0d';
       th.ctx.fillRect(0, 0, th.canvas.width, th.canvas.height);
+      // Share cards preview the finished frame (progress 1).
+      const shareCtx =
+        th.template.id === SHARE_TEMPLATE_ID && activity ? { progress: 1 } : undefined;
       drawOverlay(
         th.ctx,
         effectiveTemplate(th.template),
@@ -2625,6 +2705,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         th.canvas.height,
         units,
         activity ? { activity, t: sample.t } : undefined,
+        shareCtx,
       );
     }
   };
@@ -2683,7 +2764,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const sig = clips
       .map(
         (c) =>
-          `${c.id}:${c.status}:${c.duration.toFixed(1)}`,
+          `${c.id}:${c.status}:${(c.source === 'image' ? c.shareTotal : c.duration).toFixed(1)}`,
       )
       .join('|');
     if (sig === binMetaSig) return;
@@ -2691,7 +2772,12 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     for (const clip of clips) {
       const refs = binRows.get(clip.id);
       if (!refs) continue;
-      refs.meta.textContent = clip.duration > 0 ? formatClock(clip.duration) : '—';
+      refs.meta.textContent =
+        clip.source === 'image'
+          ? formatClock(clip.shareTotal)
+          : clip.duration > 0
+            ? formatClock(clip.duration)
+            : '—';
       refs.row.classList.toggle('selected', clip.id === selectedClipId);
     }
   };
@@ -2725,16 +2811,52 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const selectClip = (id: number): void => {
     const clip = clips.find((c) => c.id === id);
     if (!clip) return;
+    const prevSource = activeClip()?.source ?? 'video';
     selectedClipId = id;
-    if (video.src !== clip.url) {
-      video.src = clip.url;
-      srcClipId = clip.id;
-      video.currentTime = 0;
+    const isImage = clip.source === 'image';
+    if (isImage) {
+      video.pause();
+      shareT = 0;
+      shareLast = 0;
+      sharePlaying = true;
+      // Image context locks the share template; leaving restores the video one.
+      if (prevSource !== 'image' && selectedTemplateId !== SHARE_TEMPLATE_ID) {
+        lastVideoTemplateId = selectedTemplateId;
+        selectedTemplateId = SHARE_TEMPLATE_ID;
+        selected = null;
+      } else {
+        selectedTemplateId = SHARE_TEMPLATE_ID;
+      }
+    } else {
+      if (video.src !== clip.url) {
+        video.src = clip.url;
+        srcClipId = clip.id;
+        video.currentTime = 0;
+      }
+      if (prevSource === 'image') {
+        selectedTemplateId = lastVideoTemplateId ?? selectedTemplateId;
+        selected = null;
+      }
     }
     trimStartInput.value = clip.trimStart > 0 ? String(clip.trimStart) : '';
     trimEndInput.value = clip.trimEnd !== null ? String(clip.trimEnd) : '';
     audioCheck.checked = clip.includeAudio;
+    trimRow.hidden = isImage;
+    audioLabel.hidden = isImage;
+    tzRow.hidden = isImage;
+    timeline.hidden = isImage;
+    if (isImage) playBtn.disabled = false;
+    else if (video.readyState >= 1) playBtn.disabled = false;
+    shareRow.hidden = !isImage;
+    if (isImage) {
+      animInput.value = String(clip.shareAnim);
+      totalInput.value = String(clip.shareTotal);
+    }
     syncTzSelect();
+    syncCardGate();
+    syncCards();
+    syncKindOptions();
+    syncPlayBtn();
     clipName.textContent = clip.name;
     showRecorded(clip);
     binMetaSig = '';
@@ -2754,6 +2876,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       selectedClipId = null;
       const next = clips[0];
       if (next) {
+        // selectClip can't see the removed clip's context (id already nulled).
+        if (clip.source === 'image' && next.source === 'video' && selectedTemplateId === SHARE_TEMPLATE_ID) {
+          selectedTemplateId = lastVideoTemplateId ?? selectedTemplateId;
+          selected = null;
+        }
         selectClip(next.id);
       } else {
         video.removeAttribute('src');
@@ -2765,6 +2892,13 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         clipName.textContent = t('clip.none');
         showRecorded(null);
         syncTzSelect();
+        shareRow.hidden = true;
+        timeline.hidden = false;
+        if (selectedTemplateId === SHARE_TEMPLATE_ID) {
+          selectedTemplateId = lastVideoTemplateId ?? BUILTIN_TEMPLATES[0].id;
+        }
+        syncCardGate();
+        syncCards();
       }
     }
     binMetaSig = '';
@@ -2807,6 +2941,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   };
 
   const addClip = (file: Blob, name: string): number => {
+    const isImage = file.type.startsWith('image/');
     const clip: Clip = {
       id: nextClipId++,
       name,
@@ -2822,11 +2957,31 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       trimEnd: null,
       includeAudio: true,
       status: 'listo',
+      source: isImage ? 'image' : 'video',
+      img: null,
+      imgW: 0,
+      imgH: 0,
+      shareAnim: 4,
+      shareTotal: 8,
     };
     clips.push(clip);
     syncBin();
     if (selectedClipId === null) selectClip(clip.id);
     else binMetaSig = '';
+    if (isImage) {
+      // Still frames carry no recording metadata: just decode for preview dims.
+      const img = new Image();
+      img.onload = () => {
+        if (!clips.includes(clip)) return;
+        clip.img = img;
+        clip.imgW = img.naturalWidth;
+        clip.imgH = img.naturalHeight;
+        lastLiveSig = '';
+      };
+      img.src = clip.url;
+      showToast(t('st.clipAdded', { name }));
+      return clip.id;
+    }
     void Promise.all([getCreationDate(file), getCreationTime(file)]).then(([cd, ct]) => {
       if (!clips.includes(clip)) return;
       if (cd) {
@@ -3158,13 +3313,18 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   });
 
   const syncPlayBtn = (): void => {
-    const paused = video.paused;
+    const paused = isImageCtx() ? !sharePlaying : video.paused;
     playIcon.classList.toggle('icon-play', paused);
     playIcon.classList.toggle('icon-pause', !paused);
     playBtn.setAttribute('aria-label', paused ? t('stage.play') : t('stage.pause'));
   };
 
   const togglePlay = (): void => {
+    if (isImageCtx()) {
+      sharePlaying = !sharePlaying;
+      syncPlayBtn();
+      return;
+    }
     if (!video.src) return;
     if (video.paused) void video.play().catch(() => undefined);
     else video.pause();
@@ -3420,31 +3580,44 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const template = selectedTemplate();
     if (!template) throw new Error(t('r.errTemplate'));
     const trimStart = Math.max(0, clip.trimStart);
-    if (clip.trimEnd !== null && !(clip.trimEnd > trimStart)) {
+    if (clip.source === 'video' && clip.trimEnd !== null && !(clip.trimEnd > trimStart)) {
       throw new Error(t('r.errTrim', { name: clip.name }));
     }
     clip.status = 'renderizando';
     binMetaSig = '';
-    const blob = await renderVideo({
-      file: clip.file,
-      activity,
-      offsetSec: clip.offsetSec,
-      template: effectiveTemplate(template),
-      units,
-      includeAudio: clip.includeAudio,
-      trimStart,
-      trimEnd: clip.trimEnd,
-      saveStream: save?.stream,
-      onProgress: (done, total) => {
-        progress.value = total > 0 ? done / total : 0;
-        progressLabel.textContent = t('r.progressLine', {
-          tag,
-          name: clip.name,
-          done: formatClock(done),
-          total: formatClock(total),
-        });
-      },
-    });
+    const onProgress = (done: number, total: number): void => {
+      progress.value = total > 0 ? done / total : 0;
+      progressLabel.textContent = t('r.progressLine', {
+        tag,
+        name: clip.name,
+        done: formatClock(done),
+        total: formatClock(total),
+      });
+    };
+    const blob =
+      clip.source === 'image'
+        ? await renderImage({
+            file: clip.file,
+            activity,
+            template: effectiveTemplate(template),
+            units,
+            animSec: clip.shareAnim,
+            totalSec: clip.shareTotal,
+            saveStream: save?.stream,
+            onProgress,
+          })
+        : await renderVideo({
+            file: clip.file,
+            activity,
+            offsetSec: clip.offsetSec,
+            template: effectiveTemplate(template),
+            units,
+            includeAudio: clip.includeAudio,
+            trimStart,
+            trimEnd: clip.trimEnd,
+            saveStream: save?.stream,
+            onProgress,
+          });
     if (blob === null) {
       // Streamed path: finalize already closed the file; nothing to download.
       result.appendChild(el('p', 'result-line', t('r.saved', { name: save?.name ?? outputName(clip) })));
@@ -3665,6 +3838,40 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   paintPlaceholder();
 
   let lastLiveSig = '';
+
+  /** Selection outline + resize handles. Preview-only: render.ts never sees it. */
+  const paintSelection = (): void => {
+    const selBox = selectedBox();
+    if (!selBox) return;
+    const sx = selBox.x * canvas.width;
+    const sy = selBox.y * canvas.height;
+    const sw = selBox.w * canvas.width;
+    const sh = selBox.h * canvas.height;
+    liveCtx.save();
+    liveCtx.lineWidth = 10;
+    liveCtx.strokeStyle = '#ffffff';
+    liveCtx.strokeRect(sx, sy, sw, sh);
+    liveCtx.strokeStyle = '#0099ff';
+    liveCtx.lineWidth = 5;
+    liveCtx.setLineDash([12, 7]);
+    liveCtx.strokeRect(sx, sy, sw, sh);
+    liveCtx.setLineDash([]);
+    const hs = Math.max(14, canvas.width * 0.012);
+    liveCtx.fillStyle = '#ffffff';
+    liveCtx.strokeStyle = '#0099ff';
+    liveCtx.lineWidth = 3;
+    for (const [hx, hy] of [
+      [sx, sy],
+      [sx + sw - hs, sy],
+      [sx, sy + sh - hs],
+      [sx + sw - hs, sy + sh - hs],
+    ]) {
+      liveCtx.fillRect(hx, hy, hs, hs);
+      liveCtx.strokeRect(hx, hy, hs, hs);
+    }
+    liveCtx.restore();
+  };
+
   const tick = (): void => {
     const clip = activeClip();
     if (pendingToasts.length > 0 && !wrap.querySelector('dialog[open]')) {
@@ -3681,7 +3888,47 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     videoClock.textContent = t('stage.video', { vt: formatClock(vt), dur: formatClock(dur) });
     offsetClock.textContent = formatOffset(offsetSec);
 
-    if (video.src && video.readyState >= 2 && video.videoWidth > 0) {
+    const shareImg = clip?.source === 'image' ? (clip.img && clip.imgW > 0 ? clip.img : null) : null;
+    if (shareImg && clip) {
+      // Share preview: static image, looping synthetic clock, always repainting.
+      const { w: fw, h: fh } = fitShareSize(clip.imgW, clip.imgH);
+      if (canvas.width !== fw || canvas.height !== fh) {
+        canvas.width = fw;
+        canvas.height = fh;
+      }
+      const now = performance.now();
+      // Paused preview still refreshes shareLast so resume doesn't jump.
+      const dt = sharePlaying && shareLast > 0 ? (now - shareLast) / 1000 : 0;
+      shareLast = now;
+      shareT = (shareT + dt) % Math.max(clip.shareTotal, 0.5);
+      videoClock.textContent = `${formatClock(shareT)} / ${formatClock(clip.shareTotal)}`;
+      offsetClock.textContent = '';
+      liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+      liveCtx.drawImage(shareImg, 0, 0, fw, fh);
+      if (activity) {
+        const progress = Math.min(1, shareT / Math.max(clip.shareAnim, 0.1));
+        const template = selectedTemplate();
+        if (template) {
+          drawOverlay(
+            liveCtx,
+            effectiveTemplate(template),
+            sampleAt(activity, activity.durationSec),
+            fw,
+            fh,
+            units,
+            { activity, t: activity.durationSec },
+            { progress },
+          );
+        }
+        paintSelection();
+        teleClock.textContent = t('stage.tele', { t: formatSpan(activity.durationSec), suffix: '' });
+        teleClock.classList.toggle('out-of-range', false);
+        repaintThumbs(sampleAt(activity, activity.durationSec));
+      } else {
+        teleClock.textContent = t('stage.teleNone');
+        repaintThumbs(DEMO_SAMPLE);
+      }
+    } else if (video.src && video.readyState >= 2 && video.videoWidth > 0) {
       if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
@@ -3710,37 +3957,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
             { activity, t: tt },
           );
         }
-        // Selection chrome is preview-only: render.ts never sees it.
-        const selBox = selectedBox();
-        if (drawLive && selBox) {
-          const sx = selBox.x * canvas.width;
-          const sy = selBox.y * canvas.height;
-          const sw = selBox.w * canvas.width;
-          const sh = selBox.h * canvas.height;
-          liveCtx.save();
-          liveCtx.lineWidth = 10;
-          liveCtx.strokeStyle = '#ffffff';
-          liveCtx.strokeRect(sx, sy, sw, sh);
-          liveCtx.strokeStyle = '#0099ff';
-          liveCtx.lineWidth = 5;
-          liveCtx.setLineDash([12, 7]);
-          liveCtx.strokeRect(sx, sy, sw, sh);
-          liveCtx.setLineDash([]);
-          const hs = Math.max(14, canvas.width * 0.012);
-          liveCtx.fillStyle = '#ffffff';
-          liveCtx.strokeStyle = '#0099ff';
-          liveCtx.lineWidth = 3;
-          for (const [hx, hy] of [
-            [sx, sy],
-            [sx + sw - hs, sy],
-            [sx, sy + sh - hs],
-            [sx + sw - hs, sy + sh - hs],
-          ]) {
-            liveCtx.fillRect(hx, hy, hs, hs);
-            liveCtx.strokeRect(hx, hy, hs, hs);
-          }
-          liveCtx.restore();
-        }
+        if (drawLive) paintSelection();
         teleClock.textContent = t('stage.tele', {
           t: formatSpan(sample.t),
           suffix: inRange ? '' : t('stage.outOfRange'),
