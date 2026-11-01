@@ -10,11 +10,10 @@ export type { Locale };
 /** Canonical origin for sitemap, canonicals and llms.txt. Custom-domain switch: change this one const. */
 export const SEO_BASE_URL = 'https://velohud.pages.dev';
 
-/** A page the sitemap must list. `builtBy` tells who emits the HTML. */
+/** A page the sitemap must list. */
 export interface SitemapPage {
   /** Site-relative path with leading and trailing slash, e.g. `/es/`. */
   path: string;
-  builtBy: 'vite' | 'seo';
 }
 
 export interface Faq {
@@ -1265,11 +1264,11 @@ export const footerNav = (locale: Locale): FooterNav => {
 };
 
 export const SEO_PAGES: SitemapPage[] = [
-  { path: '/', builtBy: 'vite' },
-  { path: '/es/', builtBy: 'seo' },
-  { path: '/en/', builtBy: 'seo' },
+  { path: '/' },
+  { path: '/es/' },
+  { path: '/en/' },
   ...(['es', 'en'] as Locale[]).flatMap((locale) => [
-    ...GUIDES.map((g): SitemapPage => ({ path: guidePath(locale, g), builtBy: 'seo' })),
-    ...LEGAL.map((e): SitemapPage => ({ path: legalPath(locale, e), builtBy: 'seo' })),
+    ...GUIDES.map((g): SitemapPage => ({ path: guidePath(locale, g) })),
+    ...LEGAL.map((e): SitemapPage => ({ path: legalPath(locale, e) })),
   ]),
 ];

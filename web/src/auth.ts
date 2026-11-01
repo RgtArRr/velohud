@@ -1,4 +1,4 @@
-import type { Template } from '@velohud/shared';
+import { parseTemplateJson, type Template } from '@velohud/shared';
 
 /**
  * Optional account, backed by the API (Auth.js, cookie session). Everything
@@ -50,7 +50,12 @@ const clearSessionToken = (): void => {
 };
 
 /** Credentialed fetch with a timeout; idempotent GETs may retry once on 502/429/timeout. */
-async function apiFetch(path: string, init?: RequestInit, retries = 0): Promise<Response> {
+async function apiFetch(
+  path: string,
+  init?: RequestInit,
+  retries = 0,
+  timeoutMs = API_TIMEOUT_MS,
+): Promise<Response> {
   const attempt = (): Promise<Response> => {
     const headers = new Headers(init?.headers);
     const token = loadSessionToken();
@@ -59,7 +64,7 @@ async function apiFetch(path: string, init?: RequestInit, retries = 0): Promise<
       ...init,
       headers,
       credentials: 'include',
-      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   };
   try {
@@ -315,6 +320,96 @@ export async function saveCloudTemplate(
     return typeof savedId === 'string' && savedId ? savedId : id;
   } catch {
     return null;
+  }
+}
+
+export type AiFailure = 'login' | 'invalid' | 'net';
+
+/** Generate a template from a prompt; the model may also name it. No retries. */
+export async function generateAiTemplate(
+  prompt: string,
+  aspect: string,
+): Promise<Template | AiFailure> {
+  try {
+    const res = await apiFetch(
+      '/api/ai/template',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, aspect }),
+      },
+      0,
+      150_000,
+    );
+    if (res.status === 401) return 'login';
+    const data = await okJson(res);
+    const tpl = (data as { template?: unknown } | null)?.template;
+    if (!tpl) return 'invalid';
+    try {
+      return parseTemplateJson(JSON.stringify(tpl));
+    } catch {
+      return 'invalid';
+    }
+  } catch {
+    return 'net';
+  }
+}
+
+/** Adjust an existing template from an instruction. No retries. */
+export async function adjustAiTemplate(
+  template: Template,
+  instruction: string,
+  aspect: string,
+): Promise<Template | AiFailure> {
+  try {
+    const res = await apiFetch(
+      '/api/ai/adjust',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template, instruction, aspect }),
+      },
+      0,
+      150_000,
+    );
+    if (res.status === 401) return 'login';
+    const data = await okJson(res);
+    const tpl = (data as { template?: unknown } | null)?.template;
+    if (!tpl) return 'invalid';
+    try {
+      return parseTemplateJson(JSON.stringify(tpl));
+    } catch {
+      return 'invalid';
+    }
+  } catch {
+    return 'net';
+  }
+}
+
+/** Automatic template from a video frame (black/white, no prompt). No retries. */
+export async function autoAiTemplate(image: string, aspect: string): Promise<Template | AiFailure> {
+  try {
+    const res = await apiFetch(
+      '/api/ai/auto',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image, aspect }),
+      },
+      0,
+      150_000,
+    );
+    if (res.status === 401) return 'login';
+    const data = await okJson(res);
+    const tpl = (data as { template?: unknown } | null)?.template;
+    if (!tpl) return 'invalid';
+    try {
+      return parseTemplateJson(JSON.stringify(tpl));
+    } catch {
+      return 'invalid';
+    }
+  } catch {
+    return 'net';
   }
 }
 

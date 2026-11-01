@@ -113,7 +113,8 @@ body {
 }
 
 .bin,
-.inspector {
+.inspector,
+.activity-block {
   background: var(--surface);
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
@@ -125,13 +126,6 @@ body {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
-}
-
-.activity-block {
-  background: var(--surface);
-  border-radius: var(--radius-card);
-  box-shadow: var(--shadow-card);
-  padding: 24px;
 }
 
 .activity-drop,
@@ -493,26 +487,6 @@ body {
   background: var(--accent);
 }
 
-.status {
-  background: var(--surface);
-  border-radius: var(--radius-card);
-  box-shadow: var(--shadow-card);
-  padding: 24px;
-}
-
-.status-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
-}
-
-.status-row:last-child {
-  border-bottom: none;
-}
-
 .muted {
   color: var(--muted);
   font-size: 14px;
@@ -549,10 +523,6 @@ a {
 .file-label:hover,
 .btn:hover {
   border-color: var(--graphite);
-}
-
-.file-label input {
-  display: none;
 }
 
 .btn-primary {
@@ -628,13 +598,14 @@ a {
   cursor: default;
 }
 
-.auth-div {
-  text-align: center;
-  margin: 12px 0 0;
-}
-
 .stage {
   margin: 0 0 32px;
+}
+
+.stage-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 
 .source-video {
@@ -642,6 +613,7 @@ a {
 }
 
 .live-preview {
+  cursor: default;
   display: block;
   margin: 0 auto;
   width: auto;
@@ -651,7 +623,6 @@ a {
   background: #000;
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
-  cursor: pointer;
   touch-action: none;
 }
 
@@ -735,18 +706,23 @@ a {
   font-size: 14px;
 }
 
-.goto-input {
+.trim-input.goto-input {
   width: 110px;
 }
 
-.trim-input {
-  width: 88px;
+.trim-input,
+.font-select,
+.name-input {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-input);
   color: var(--graphite);
-  padding: 8px;
   font-size: 14px;
+}
+
+.trim-input {
+  width: 88px;
+  padding: 8px;
   font-family: inherit;
   font-variant-numeric: tabular-nums;
 }
@@ -768,12 +744,7 @@ a {
 }
 
 .font-select {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-input);
-  color: var(--graphite);
   padding: 7px 8px;
-  font-size: 14px;
   font-family: inherit;
   max-width: 104px;
 }
@@ -784,7 +755,7 @@ a {
   min-width: 0;
 }
 
-.font-picker-btn {
+.widget-form .font-picker-btn {
   width: 100%;
   max-width: none;
   display: flex;
@@ -914,6 +885,8 @@ a {
   box-shadow: var(--shadow-card);
   padding: 24px;
   width: min(340px, calc(100vw - 48px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
   color: var(--graphite);
   font-family: var(--font-body);
 }
@@ -951,6 +924,10 @@ a {
 }
 
 .check input {
+  accent-color: var(--ink);
+}
+
+.unit-check {
   accent-color: var(--ink);
 }
 
@@ -1001,6 +978,25 @@ a {
   text-overflow: ellipsis;
 }
 
+.seg-switch.fill.tab-bar {
+  display: flex;
+}
+
+/* New-template tabs: labels must read whole ("Automática"), wrap if needed. */
+.seg-switch.fill.tab-bar {
+  margin-bottom: 12px;
+}
+
+.seg-switch.fill.tab-bar .seg-opt {
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: break-word;
+  hyphens: auto;
+  line-height: 1.15;
+  font-size: 12px;
+  padding: 5px 6px;
+}
+
 .header-sep {
   width: 1px;
   height: 24px;
@@ -1022,10 +1018,29 @@ a {
   gap: 12px;
   margin-bottom: 16px;
   padding-bottom: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.template-cards::-webkit-scrollbar {
+  height: 8px;
+}
+
+.template-cards::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.template-cards::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+.template-cards::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
 }
 
 .template-card {
-  position: relative;
+  max-width: 532px;
   background: var(--surface);
   border: 2px solid transparent;
   border-radius: var(--radius-card);
@@ -1047,10 +1062,11 @@ a {
   text-align: left;
 }
 
-.card-export {
-  position: absolute;
-  right: 10px;
-  bottom: 10px;
+/* Shared 28px card-icon button geometry (export/delete/AI keep their own hooks). */
+.card-export,
+.card-delete,
+.card-ai {
+  flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1059,9 +1075,13 @@ a {
   padding: 0;
   border-radius: 8px;
   background: var(--surface);
-  color: var(--graphite);
   border: 1px solid var(--border);
   cursor: pointer;
+}
+
+.card-export,
+.card-ai {
+  color: var(--graphite);
 }
 
 .card-export:hover {
@@ -1070,20 +1090,7 @@ a {
 }
 
 .card-delete {
-  position: absolute;
-  left: 10px;
-  bottom: 10px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-radius: 8px;
-  background: var(--surface);
   color: var(--stone);
-  border: 1px solid var(--border);
-  cursor: pointer;
   font-size: 16px;
   line-height: 1;
 }
@@ -1091,6 +1098,19 @@ a {
 .card-delete:hover {
   border-color: var(--danger);
   color: var(--danger);
+}
+
+.card-ai:hover {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.card-ai .icon {
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url('/icons/sparkles.svg') no-repeat center / contain;
+  mask: url('/icons/sparkles.svg') no-repeat center / contain;
 }
 
 .play-btn {
@@ -1195,12 +1215,38 @@ a {
   background: #0d0d0d;
 }
 
+.card-foot {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  padding: 8px 4px 4px;
+}
+
 .template-name {
   display: block;
+  flex: 1 1 0;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
   font-size: 14px;
   color: var(--graphite);
-  padding: 8px 40px 4px 4px;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.template-name[contenteditable='true'] {
+  background: var(--surface);
+  border-radius: 4px;
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
+  cursor: text;
+  overflow: visible;
 }
 
 .template-card.new-template {
@@ -1230,13 +1276,49 @@ a {
 .name-input {
   flex: 1;
   min-width: 0;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-input);
-  color: var(--graphite);
   padding: 7px 8px;
   font-size: 14px;
   font-family: inherit;
+}
+
+.prompt-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.prompt-row .prompt-input {
+  flex: none;
+}
+
+.prompt-input {
+  min-height: 88px;
+  max-height: 40vh;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.toast-box {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  background: var(--ink);
+  color: #ffffff;
+  padding: 10px 14px;
+  border-radius: var(--radius-input);
+  box-shadow: var(--shadow-card);
+  font-size: 14px;
+  max-width: 320px;
+  overflow-wrap: break-word;
 }
 
 .import-err {

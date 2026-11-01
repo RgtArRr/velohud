@@ -57,9 +57,12 @@ import {
 import { getLocale, saveLocale, t, type Locale } from './i18n.js';
 import { DONATE_URL } from '../seo/content.js';
 import {
+  adjustAiTemplate,
+  autoAiTemplate,
   deleteCloudTemplate,
   deleteIntervalsKey,
   fetchSession,
+  generateAiTemplate,
   getIntervalsStreams,
   intervalsStatus,
   listCloudTemplates,
@@ -70,6 +73,7 @@ import {
   saveCloudTemplate,
   saveIntervalsKey,
   type AccountUser,
+  type AiFailure,
   type IntervalsActivity,
 } from './auth.js';
 
@@ -252,7 +256,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         if (!savedId) {
           if (!cloudErrShown) {
             cloudErrShown = true;
-            setStatus(t('auth.errCloud'));
+            showToast(t('auth.errCloud'));
           }
         } else {
           cloudErrShown = false;
@@ -335,25 +339,43 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   unitsGroup.setAttribute('role', 'group');
   unitsGroup.setAttribute('aria-label', t('hdr.units'));
   const unitBtns: HTMLButtonElement[] = [];
-  const syncUnits = (): void => {
-    for (const b of unitBtns) {
-      const active = b.dataset.units === units;
-      b.classList.toggle('active', active);
-      b.setAttribute('aria-pressed', String(active));
+  /** Segmented-control active state: one toggle shape for every seg group. */
+  const syncSeg = (
+    btns: Iterable<HTMLButtonElement>,
+    isActive: (btn: HTMLButtonElement) => boolean,
+  ): void => {
+    for (const btn of btns) {
+      const active = isActive(btn);
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', String(active));
     }
   };
-  const mkUnit = (value: Units, text: string): void => {
+  const syncUnits = (): void => {
+    syncSeg(unitBtns, (b) => b.dataset.units === units);
+  };
+  /** Segmented option button shared by the units and locale groups. */
+  const mkSegOpt = (
+    group: HTMLElement,
+    key: 'units' | 'locale',
+    value: string,
+    text: string,
+    onPick: () => void,
+  ): HTMLButtonElement => {
     const btn = el('button', 'seg-opt', text);
     btn.type = 'button';
-    btn.dataset.units = value;
-    btn.addEventListener('click', () => {
+    btn.dataset[key] = value;
+    btn.addEventListener('click', onPick);
+    group.appendChild(btn);
+    return btn;
+  };
+  const mkUnit = (value: Units, text: string): void => {
+    const btn = mkSegOpt(unitsGroup, 'units', value, text, () => {
       if (units === value) return;
       units = value;
       syncUnits();
       renderActivityStats();
     });
     unitBtns.push(btn);
-    unitsGroup.appendChild(btn);
   };
   mkUnit('metric', 'km / m');
   mkUnit('imperial', 'mi / ft');
@@ -362,19 +384,15 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   localeGroup.setAttribute('role', 'group');
   localeGroup.setAttribute('aria-label', t('hdr.locale'));
   const mkLocale = (value: Locale, text: string): void => {
-    const btn = el('button', 'seg-opt', text);
-    btn.type = 'button';
-    btn.dataset.locale = value;
-    const active = getLocale() === value;
-    btn.classList.toggle('active', active);
-    btn.setAttribute('aria-pressed', String(active));
-    btn.addEventListener('click', () => {
+    const btn = mkSegOpt(localeGroup, 'locale', value, text, () => {
       if (getLocale() !== value) {
         saveLocale(value);
         location.reload();
       }
     });
-    localeGroup.appendChild(btn);
+    const active = getLocale() === value;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
   };
   mkLocale('es', 'ES');
   mkLocale('en', 'EN');
@@ -496,28 +514,65 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const showModal = (dialog: HTMLDialogElement): void => {
     if (!dialog.open) dialog.showModal();
   };
+  /** Reusable promise confirm: true on accept, false on cancel/backdrop/Escape. */
+  const confirmDialogEl = el('dialog', 'add-dialog');
+  const confirmH = el('h2', undefined, '');
+  const confirmP = el('p', 'muted', '');
+  const confirmActions = el('div', 'add-actions');
+  const confirmOk = el('button', 'btn btn-primary', '');
+  confirmOk.type = 'button';
+  const confirmCancel = el('button', 'btn', '');
+  confirmCancel.type = 'button';
+  confirmActions.append(confirmOk, confirmCancel);
+  confirmDialogEl.append(confirmH, confirmP, confirmActions);
+  wrap.appendChild(confirmDialogEl);
+  let confirmResolve: ((v: boolean) => void) | null = null;
+  const closeConfirm = (v: boolean): void => {
+    if (confirmDialogEl.open) confirmDialogEl.close();
+    confirmResolve?.(v);
+    confirmResolve = null;
+  };
+  confirmOk.addEventListener('click', () => closeConfirm(true));
+  confirmCancel.addEventListener('click', () => closeConfirm(false));
+  confirmDialogEl.addEventListener('cancel', () => closeConfirm(false));
+  confirmDialogEl.addEventListener('click', (e) => {
+    if (e.target === confirmDialogEl) closeConfirm(false);
+  });
+  const askConfirm = (title: string, body: string, okLabel: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      closeConfirm(false);
+      confirmResolve = resolve;
+      confirmH.textContent = title;
+      confirmP.textContent = body;
+      confirmOk.textContent = okLabel;
+      confirmCancel.textContent = t('tpl.cancel');
+      showModal(confirmDialogEl);
+    });
   loginBtn.addEventListener('click', () => {
     syncAuthDialog();
     showModal(authDialog);
   });
   authCancelBtn.addEventListener('click', () => authDialog.close());
-  const outsideAuthDialog = (e: { clientX: number; clientY: number }): boolean => {
-    const r = authDialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+  /** Backdrop-only close: padding and row gaps look inside the card but report
+   * the dialog itself as the click target, so test coordinates instead. */
+  const wireBackdropClose = (
+    dialog: HTMLDialogElement,
+    opts: { isBusy?: () => boolean } = {},
+  ): void => {
+    const outside = (e: { clientX: number; clientY: number }): boolean => {
+      const r = dialog.getBoundingClientRect();
+      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+    };
+    let downOutside = false;
+    dialog.addEventListener('pointerdown', (e) => {
+      downOutside = outside(e);
+    });
+    dialog.addEventListener('click', (e) => {
+      if (downOutside && outside(e) && !(opts.isBusy?.())) dialog.close();
+      downOutside = false;
+    });
   };
-  let authDownOutside = false;
-  authDialog.addEventListener('pointerdown', (e) => {
-    authDownOutside = outsideAuthDialog(e);
-  });
-  authDialog.addEventListener('click', (e) => {
-    if (authDownOutside && outsideAuthDialog(e)) authDialog.close();
-    authDownOutside = false;
-  });
-
-  const status = el('p', 'muted', '');
-  status.hidden = true;
-  status.setAttribute('role', 'status');
-  wrap.appendChild(status);
+  wireBackdropClose(authDialog);
 
   const grid = el('div', 'editor-grid');
   wrap.appendChild(grid);
@@ -555,7 +610,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       void file
         .arrayBuffer()
         .then((buffer) => loadActivityFile(buffer, file.name))
-        .catch(() => setStatus(t('st.activityUnreadable')));
+        .catch(() => showToast(t('st.activityUnreadable')));
     }
   });
   // A missed drop must not navigate the app away to the raw file.
@@ -572,7 +627,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   // need a zone. Same fixed-offset selector as clips.
   const activityTzRow = el('div', 'editor-row');
   activityTzRow.append(el('span', 'muted', t('activity.tz')));
-  const activityTzSelect = el('select', 'font-select tz-select activity-tz-select');
+  const activityTzSelect = el('select', 'font-select tz-select');
   activityTzSelect.title = t('activity.tzTitle');
   activityTzRow.appendChild(activityTzSelect);
   activityTzRow.hidden = true;
@@ -600,7 +655,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const offsetHours = Number(activityTzSelect.value);
     const next = activityStartFromOffset(activityTz.wall, offsetHours);
     if (!next) {
-      setStatus(t('activity.tzInvalid'));
+      showToast(t('activity.tzInvalid'));
       activityTzSelect.value = String(activityTz.offsetHours);
       return;
     }
@@ -610,15 +665,15 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     for (const clip of clips) {
       if (!clip.offsetDirty) applyAutoOffset(clip);
     }
-    setStatus(t('activity.tzApplied', { tz: tzName(activityTz.offsetHours) }));
+    showToast(t('activity.tzApplied', { tz: tzName(activityTz.offsetHours) }));
     activityTzEditing = false;
     syncActivityTzRow();
     binMetaSig = '';
   });
   // Intervals picker: API-key account source, same file load path.
-  const icuDialog = el('dialog', 'add-dialog icu-dialog');
+  const icuDialog = el('dialog', 'add-dialog');
   const icuTitle = el('h2', undefined, t('intervals.title'));
-  const icuKeyView = el('div', 'icu-view');
+  const icuKeyView = el('div');
   const icuKeyInput = el('input', 'name-input auth-field');
   icuKeyInput.type = 'password';
   icuKeyInput.placeholder = t('intervals.keyPh');
@@ -642,7 +697,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     icuKeyErr,
     icuKeySave,
   );
-  const icuListView = el('div', 'icu-view');
+  const icuListView = el('div');
   const icuState = el('p', 'muted', '');
   const icuList = el('div', 'act-list');
   const icuPager = el('div', 'act-pager');
@@ -661,11 +716,6 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   icuDialog.append(icuTitle, icuKeyView, icuListView, icuActions);
   wrap.appendChild(icuDialog);
   icuCancel.addEventListener('click', () => icuDialog.close());
-  const outsideIcuDialog = (e: { clientX: number; clientY: number }): boolean => {
-    const r = icuDialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-  };
-  let icuDownOutside = false;
   let icuBusy = false;
   const setIcuBusy = (busy: boolean): void => {
     icuBusy = busy;
@@ -677,13 +727,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     icuCancel.disabled = busy;
     icuDisconnect.disabled = busy;
   };
-  icuDialog.addEventListener('pointerdown', (e) => {
-    icuDownOutside = outsideIcuDialog(e);
-  });
-  icuDialog.addEventListener('click', (e) => {
-    if (icuDownOutside && outsideIcuDialog(e) && !icuBusy) icuDialog.close();
-    icuDownOutside = false;
-  });
+  wireBackdropClose(icuDialog, { isBusy: () => icuBusy });
   icuDialog.addEventListener('cancel', (e) => {
     if (icuBusy) e.preventDefault();
   });
@@ -704,7 +748,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     icuDialog.close();
     syncAuthDialog();
     showModal(authDialog);
-    setStatus(t('intervals.loginExpired'));
+    showToast(t('intervals.loginExpired'));
   };
   const renderIcuPage = async (): Promise<void> => {
     icuState.textContent = t('intervals.loading');
@@ -772,18 +816,14 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     void renderIcuPage();
   };
   const localeTag = (): string => (getLocale() === 'es' ? 'es-ES' : 'en-US');
-  icuPrev.addEventListener('click', () => {
-    if (icuPage > 1) {
-      icuPage -= 1;
-      void renderIcuPage();
-    }
-  });
-  icuNext.addEventListener('click', () => {
-    if (icuPage < ICU_MAX_PAGE) {
-      icuPage += 1;
-      void renderIcuPage();
-    }
-  });
+  const turnIcuPage = (delta: -1 | 1): void => {
+    const next = icuPage + delta;
+    if (next < 1 || next > ICU_MAX_PAGE) return;
+    icuPage = next;
+    void renderIcuPage();
+  };
+  icuPrev.addEventListener('click', () => turnIcuPage(-1));
+  icuNext.addEventListener('click', () => turnIcuPage(1));
   icuKeySave.addEventListener('click', () => {
     const key = icuKeyInput.value.trim();
     if (!key) {
@@ -834,7 +874,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         activityPill.hidden = true;
         renderActivityStats();
         syncActivityTzRow();
-        setStatus(err instanceof Error ? err.message : t('intervals.error'));
+        showToast(err instanceof Error ? err.message : t('intervals.error'));
       }
     } finally {
       setIcuBusy(false);
@@ -1004,7 +1044,8 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     'muted',
     coarsePointer ? t('stage.hintTouch') : t('stage.hint'),
   );
-  stage.append(video, canvas, timeline, clocks, stageHint);
+  const stageTools = el('div', 'stage-tools');
+  stage.append(stageTools, video, canvas, timeline, clocks, stageHint);
   center.appendChild(stage);
 
   // Sync lives right under the video timeline.
@@ -1072,18 +1113,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   addCancelBtn.addEventListener('click', () => addDialog.close());
   // Backdrop-only close: padding and row gaps look inside the card but report
   // the dialog itself as the click target, so test coordinates instead.
-  const outsideDialog = (e: { clientX: number; clientY: number }): boolean => {
-    const r = addDialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-  };
-  let downOutside = false;
-  addDialog.addEventListener('pointerdown', (e) => {
-    downOutside = outsideDialog(e);
-  });
-  addDialog.addEventListener('click', (e) => {
-    if (downOutside && outsideDialog(e)) addDialog.close();
-    downOutside = false;
-  });
+  wireBackdropClose(addDialog);
   addConfirmBtn.addEventListener('click', () => {
     const template = selectedTemplate();
     if (!template) return;
@@ -1124,7 +1154,8 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     // Delayed: revoking synchronously can cancel the download before it starts.
     setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
-  templateHead.append(resetWidgetsBtn, addOpenBtn);
+  templateHead.append(resetWidgetsBtn);
+  stageTools.appendChild(addOpenBtn);
   wrap.appendChild(addDialog);
   templateBox.appendChild(templateHead);
   interface Thumb {
@@ -1162,6 +1193,27 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       th.exp.hidden = !th.custom && !isEdited(th.template.id);
     }
   };
+  /** Card corner button: titled + labelled, with an icon glyph or '×' text. */
+  const mkCardIconBtn = (
+    className: string,
+    title: string,
+    label: string,
+    iconClass: string | null,
+    onClick: () => void,
+  ): HTMLButtonElement => {
+    const btn = el('button', className);
+    btn.type = 'button';
+    if (iconClass === null) btn.textContent = '×';
+    else {
+      const icon = el('span', `icon ${iconClass}`);
+      icon.setAttribute('aria-hidden', 'true');
+      btn.appendChild(icon);
+    }
+    btn.title = title;
+    btn.setAttribute('aria-label', label);
+    btn.addEventListener('click', onClick);
+    return btn;
+  };
   const addCard = (tpl: Template, custom = false): HTMLElement => {
     const card = el('div', 'template-card');
     const thumbCanvas = document.createElement('canvas');
@@ -1174,29 +1226,81 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const openBtn = el('button', 'template-open');
     openBtn.type = 'button';
     openBtn.setAttribute('aria-label', tpl.name);
-    openBtn.append(thumbCanvas, el('span', 'template-name', tpl.name));
-    openBtn.addEventListener('click', () => {
+    openBtn.appendChild(thumbCanvas);
+    const selectThis = (): void => {
       selectedTemplateId = tpl.id;
       syncCards();
-    });
-    const exportBtn = el('button', 'card-export');
-    exportBtn.type = 'button';
-    exportBtn.title = t('tpl.exportTitle');
-    exportBtn.setAttribute('aria-label', t('tpl.export'));
-    const icon = el('span', 'icon icon-download');
-    icon.setAttribute('aria-hidden', 'true');
-    exportBtn.appendChild(icon);
-    exportBtn.addEventListener('click', () => downloadTemplate(tpl));
+    };
+    openBtn.addEventListener('click', selectThis);
+    const nameBtn = el('button', 'template-name', tpl.name);
+    nameBtn.type = 'button';
+    nameBtn.addEventListener('click', selectThis);
+    /** Customs rename inline (double-click): builtins are a fixed catalog. */
     if (custom) {
-      const delBtn = el('button', 'card-delete');
-      delBtn.type = 'button';
-      delBtn.textContent = '×';
-      delBtn.title = t('tpl.deleteTitle');
-      delBtn.setAttribute('aria-label', t('tpl.delete'));
-      delBtn.addEventListener('click', () => deleteCustom(tpl.id));
-      card.appendChild(delBtn);
+      nameBtn.title = t('tpl.renameTitle');
+      nameBtn.addEventListener('dblclick', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (nameBtn.isContentEditable) return;
+        nameBtn.contentEditable = 'true';
+        nameBtn.focus();
+        document.getSelection()?.selectAllChildren(nameBtn);
+        const commit = (save: boolean): void => {
+          nameBtn.contentEditable = 'false';
+          nameBtn.removeEventListener('blur', onBlur);
+          nameBtn.removeEventListener('keydown', onKey);
+          const next = (nameBtn.textContent ?? '').trim().slice(0, 60);
+          if (save && next && next !== tpl.name) {
+            tpl.name = next;
+            nameBtn.textContent = next;
+            openBtn.setAttribute('aria-label', next);
+            schedulePersist();
+            if (account && cloudIds.has(tpl.id)) {
+              void saveCloudTemplate(tpl.id, tpl.name, effectiveTemplate(tpl)).then((savedId) => {
+                if (!savedId) showToast(t('auth.errCloud'));
+              });
+            }
+          } else {
+            nameBtn.textContent = tpl.name;
+          }
+        };
+        const onBlur = (): void => commit(true);
+        const onKey = (ev: KeyboardEvent): void => {
+          if (ev.isComposing || ev.keyCode === 229) return;
+          // code fallback: some keyboards/automation emit no key (calibrated headless).
+          const k = ev.key || ev.code;
+          if (k === 'Enter') {
+            ev.preventDefault();
+            nameBtn.blur();
+          } else if (k === 'Escape') {
+            ev.preventDefault();
+            commit(false);
+          }
+        };
+        nameBtn.addEventListener('blur', onBlur);
+        nameBtn.addEventListener('keydown', onKey);
+      });
     }
-    card.append(openBtn, exportBtn);
+    const foot = el('div', 'card-foot');
+    foot.appendChild(nameBtn);
+    const exportBtn = mkCardIconBtn('card-export', t('tpl.exportTitle'), t('tpl.export'), 'icon-download', () =>
+      downloadTemplate(tpl),
+    );
+    if (custom) {
+      const delBtn = mkCardIconBtn('card-delete', t('tpl.deleteTitle'), t('tpl.delete'), null, () => {
+        void askConfirm(t('tpl.deleteH'), t('tpl.deleteBody', { name: tpl.name }), t('tpl.delete')).then(
+          (ok) => {
+            if (ok) deleteCustom(tpl.id);
+          },
+        );
+      });
+      foot.appendChild(delBtn);
+    }
+    const cardAiBtn = mkCardIconBtn('card-ai', t('ai.improveTitle'), t('ai.improveTitle'), 'icon-sparkles', () =>
+      openAdjustDialog(tpl),
+    );
+    foot.append(exportBtn, cardAiBtn);
+    card.append(openBtn, foot);
     cardsBox.appendChild(card);
     thumbs.push({
       template: tpl,
@@ -1232,7 +1336,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       th.canvas.height = dims.h;
       th.sig = '';
     }
+    // "+" card matches a template card: 108px thumb height (style.css) + 16px padding + 4px border.
+    newCard.style.width = `${((108 * dims.w) / dims.h + 20).toFixed(1)}px`;
   };
+  sizeThumbs();
   templateBox.appendChild(cardsBox);
   // Vertical wheel over the strip scrolls it horizontally; page scroll resumes at the ends.
   cardsBox.addEventListener(
@@ -1263,37 +1370,53 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   nameRow.appendChild(nameInput);
   const fileRow = el('div', 'editor-row');
   fileRow.append(el('span', 'muted', t('tpl.fileLabel')));
-  const fileInput = el('input', 'name-input file-input');
+  const fileInput = el('input', 'name-input');
   fileInput.type = 'file';
   fileInput.accept = IS_IOS ? '' : 'application/json,.json';
   fileRow.appendChild(fileInput);
   const importErr = el('p', 'import-err', t('tpl.errImport'));
   importErr.hidden = true;
+  type NewMode = 'blank' | 'import' | 'ai' | 'auto';
+  const modeTabs = el('div', 'seg-switch fill tab-bar');
+  modeTabs.setAttribute('role', 'tablist');
+  modeTabs.setAttribute('aria-label', t('tpl.createH'));
+  const tabBtns = new Map<NewMode, HTMLButtonElement>();
+  for (const [mode, text] of [
+    ['blank', t('tpl.tabBlank')],
+    ['import', t('tpl.tabImport')],
+    ['ai', t('tpl.tabAi')],
+    ['auto', t('ai.auto')],
+  ] as [NewMode, string][]) {
+    const btn = el('button', 'seg-opt', text);
+    btn.type = 'button';
+    btn.setAttribute('role', 'tab');
+    btn.dataset.newMode = mode;
+    modeTabs.appendChild(btn);
+    tabBtns.set(mode, btn);
+  }
+  const blankBody = el('p', 'muted', t('tpl.blankHint'));
+  const promptRow = el('div', 'prompt-row');
+  promptRow.append(el('span', 'muted', t('ai.promptLabel')));
+  const promptInput = document.createElement('textarea');
+  promptInput.className = 'name-input prompt-input';
+  promptInput.placeholder = t('ai.promptPh');
+  promptInput.maxLength = 500;
+  promptInput.rows = 4;
+  promptRow.appendChild(promptInput);
+  promptRow.hidden = true;
+  const autoBody = el('p', 'muted', t('ai.autoBody'));
+  autoBody.hidden = true;
   const newActions = el('div', 'add-actions');
-  const createBtn = el('button', 'btn btn-primary', t('tpl.create'));
-  createBtn.type = 'button';
+  const primaryBtn = el('button', 'btn btn-primary', t('tpl.create'));
+  primaryBtn.type = 'button';
   const newCancelBtn = el('button', 'btn', t('tpl.cancel'));
   newCancelBtn.type = 'button';
-  newActions.append(createBtn, newCancelBtn);
-  newDialog.append(
-    nameRow,
-    el('p', 'muted', t('tpl.orImport')),
-    fileRow,
-    importErr,
-    newActions,
-  );
+  newActions.append(primaryBtn, newCancelBtn);
+  newDialog.append(modeTabs, nameRow, blankBody, fileRow, promptRow, autoBody, importErr, newActions);
   newCancelBtn.addEventListener('click', () => newDialog.close());
-  const outsideNewDialog = (e: { clientX: number; clientY: number }): boolean => {
-    const r = newDialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-  };
-  let newDownOutside = false;
-  newDialog.addEventListener('pointerdown', (e) => {
-    newDownOutside = outsideNewDialog(e);
-  });
-  newDialog.addEventListener('click', (e) => {
-    if (newDownOutside && outsideNewDialog(e)) newDialog.close();
-    newDownOutside = false;
+  wireBackdropClose(newDialog, { isBusy: () => aiBusy });
+  newDialog.addEventListener('cancel', (e) => {
+    if (aiBusy) e.preventDefault();
   });
   /** Drops a session custom (card + model) so cloud restores can replace it. */
   const removeCustom = (id: string): void => {
@@ -1317,7 +1440,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (cloudIds.has(id)) {
       cloudIds.delete(id);
       void deleteCloudTemplate(id).then((ok) => {
-        if (!ok) setStatus(t('auth.errCloud'));
+        if (!ok) showToast(t('auth.errCloud'));
       });
     }
     const wasSelected = selectedTemplateId === id;
@@ -1348,14 +1471,79 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       void saveCloudTemplate(tpl.id, tpl.name, effectiveTemplate(tpl)).then((savedId) => {
         // Adopt whatever id the server stored (it round-trips ours today).
         if (savedId) cloudIds.add(savedId);
-        else setStatus(t('auth.errCloud'));
+        else showToast(t('auth.errCloud'));
       });
     }
   };
-  createBtn.addEventListener('click', () => {
+  let newMode: NewMode = 'blank';
+  let aiBusy = false;
+  const syncPrimary = (): void => {
+    primaryBtn.textContent =
+      aiBusy
+        ? t('ai.generating')
+        : newMode === 'ai'
+          ? t('ai.generate')
+          : newMode === 'auto'
+            ? t('ai.auto')
+            : t('tpl.create');
+    primaryBtn.disabled =
+      aiBusy ||
+      (newMode === 'import' && !fileInput.files?.length) ||
+      (newMode === 'ai' && !promptInput.value.trim());
+  };
+  const setNewMode = (mode: NewMode): void => {
+    newMode = mode;
+    nameRow.hidden = mode !== 'blank';
+    blankBody.hidden = mode !== 'blank';
+    fileRow.hidden = mode !== 'import';
+    promptRow.hidden = mode !== 'ai';
+    autoBody.hidden = mode !== 'auto';
+    importErr.hidden = true;
+    syncSeg(tabBtns.values(), (btn) => btn.dataset.newMode === mode);
+    syncPrimary();
+  };
+  const aspectNow = (): string =>
+    activeClip() ? classifyAspect(canvas.width, canvas.height) : 'vertical';
+  const runAiRequest = (req: Promise<Template | AiFailure>): void => {
+    aiBusy = true;
+    syncPrimary();
+    const aiReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    newDialog.inert = true;
+    importErr.hidden = true;
+    void req.then((result) => {
+      aiBusy = false;
+      syncPrimary();
+      newDialog.inert = false;
+      aiReturnFocus?.focus();
+      if (typeof result === 'string') {
+        importErr.textContent =
+          result === 'login' ? t('ai.errLogin') : result === 'net' ? t('ai.errNet') : t('ai.errInvalid');
+        importErr.hidden = false;
+        return;
+      }
+      insertCustom({
+        ...result,
+        id: freshTemplateId(),
+        name: result.name.trim() || t('tpl.untitled'),
+      });
+      newDialog.close();
+    });
+  };
+  /** Current video frame as a small JPEG data URL for the auto mode. */
+  const captureFrame = (): string | null => {
+    if (video.videoWidth === 0 || video.videoHeight === 0) return null;
+    const shot = document.createElement('canvas');
+    const scale = Math.min(1, 480 / video.videoWidth);
+    shot.width = Math.max(2, Math.round(video.videoWidth * scale));
+    shot.height = Math.max(2, Math.round(video.videoHeight * scale));
+    const shotCtx = shot.getContext('2d');
+    if (!shotCtx) return null;
+    shotCtx.drawImage(video, 0, 0, shot.width, shot.height);
+    return shot.toDataURL('image/jpeg', 0.7);
+  };
+  primaryBtn.addEventListener('click', () => {
     const typed = nameInput.value.trim();
-    const file = fileInput.files?.[0] ?? null;
-    if (!file) {
+    if (newMode === 'blank') {
       insertCustom({
         schemaVersion: TEMPLATE_SCHEMA_VERSION,
         id: freshTemplateId(),
@@ -1366,37 +1554,172 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       newDialog.close();
       return;
     }
-    void file
-      .text()
-      .then((text) => {
-        let tpl: Template;
-        try {
-          tpl = parseTemplateJson(text);
-        } catch (err) {
-          importErr.textContent =
-            err instanceof Error && err.message === 'legacy template'
-              ? t('tpl.errLegacy')
-              : t('tpl.errImport');
+    if (newMode === 'import') {
+      const file = fileInput.files?.[0] ?? null;
+      if (!file) return;
+      void file
+        .text()
+        .then((text) => {
+          let tpl: Template;
+          try {
+            tpl = parseTemplateJson(text);
+          } catch (err) {
+            importErr.textContent =
+              err instanceof Error && err.message === 'legacy template'
+                ? t('tpl.errLegacy')
+                : t('tpl.errImport');
+            importErr.hidden = false;
+            return;
+          }
+          insertCustom({
+            ...tpl,
+            id: freshTemplateId(),
+            name: tpl.name.trim() || t('tpl.untitled'),
+          });
+          newDialog.close();
+        })
+        .catch(() => {
           importErr.hidden = false;
-          return;
-        }
-        insertCustom({
-          ...tpl,
-          id: freshTemplateId(),
-          name: typed || tpl.name.trim() || t('tpl.untitled'),
         });
-        newDialog.close();
-      })
-      .catch(() => {
-        importErr.hidden = false;
-      });
+      return;
+    }
+    if (aiBusy) return;
+    if (newMode === 'ai') {
+      const prompt = promptInput.value.trim();
+      if (!prompt) return;
+      runAiRequest(generateAiTemplate(prompt, aspectNow()));
+      return;
+    }
+    const image = captureFrame();
+    if (!image) {
+      showToast(t('ai.needClip'));
+      return;
+    }
+    runAiRequest(autoAiTemplate(image, aspectNow()));
+  });
+  setNewMode('blank');
+  const AI_CONSENT_KEY = 'override.aiConsent';
+  const AI_CONSENT_FRAME_KEY = 'override.aiConsentFrame';
+  const hasAiConsent = (key: string): boolean => {
+    try {
+      return localStorage.getItem(key) === '1';
+    } catch {
+      return false;
+    }
+  };
+  promptInput.addEventListener('input', syncPrimary);
+  fileInput.addEventListener('change', syncPrimary);
+  const ensureAiConsent = async (body: string, key = AI_CONSENT_KEY): Promise<boolean> => {
+    if (hasAiConsent(key)) return true;
+    const ok = await askConfirm(t('ai.consentH'), body, t('ai.continue'));
+    if (!ok) return false;
+    try {
+      localStorage.setItem(key, '1');
+    } catch {
+      /* private mode: ask again next time */
+    }
+    return true;
+  };
+  tabBtns.get('blank')?.addEventListener('click', () => setNewMode('blank'));
+  tabBtns.get('import')?.addEventListener('click', () => setNewMode('import'));
+  tabBtns.get('ai')?.addEventListener('click', () => {
+    void ensureAiConsent(t('ai.consentBody')).then((ok) => {
+      if (!ok) return;
+      setNewMode('ai');
+      promptInput.focus();
+    });
+  });
+  tabBtns.get('auto')?.addEventListener('click', () => {
+    void ensureAiConsent(t('ai.consentBodyAuto'), AI_CONSENT_FRAME_KEY).then((ok) => {
+      if (!ok) return;
+      setNewMode('auto');
+    });
   });
   newCard.addEventListener('click', () => {
+    // No video, no modal: creation (blank, import, AI) needs the video aspect.
+    if (activeClip() === null || video.videoWidth === 0) {
+      showToast(t('ai.needClip'));
+      return;
+    }
     nameInput.value = '';
     fileInput.value = '';
+    promptInput.value = '';
     importErr.textContent = t('tpl.errImport');
     importErr.hidden = true;
+    setNewMode('blank');
     showModal(newDialog);
+  });
+  const adjustDialog = el('dialog', 'add-dialog');
+  const adjustH = el('h2', undefined, t('ai.adjustH'));
+  const adjustName = el('p', 'muted', '');
+  const adjustRow = el('div', 'editor-row');
+  const adjustInput = document.createElement('textarea');
+  adjustInput.className = 'name-input prompt-input';
+  adjustInput.placeholder = t('ai.adjustPh');
+  adjustInput.maxLength = 500;
+  adjustInput.rows = 4;
+  adjustRow.appendChild(adjustInput);
+  const adjustErr = el('p', 'import-err', t('ai.errInvalid'));
+  adjustErr.hidden = true;
+  const adjustActions = el('div', 'add-actions');
+  const improveBtn = el('button', 'btn btn-primary', t('ai.improve'));
+  improveBtn.type = 'button';
+  const adjustCancelBtn = el('button', 'btn', t('tpl.cancel'));
+  adjustCancelBtn.type = 'button';
+  adjustActions.append(improveBtn, adjustCancelBtn);
+  adjustDialog.append(adjustH, adjustName, adjustRow, adjustErr, adjustActions);
+  wrap.appendChild(adjustDialog);
+  let adjustTarget: Template | null = null;
+  let adjusting = false;
+  const syncImproveBtn = (): void => {
+    improveBtn.disabled = adjusting || !adjustInput.value.trim();
+    improveBtn.textContent = adjusting ? t('ai.generating') : t('ai.improve');
+  };
+  const openAdjustDialog = (tpl: Template): void => {
+    if (activeClip() === null || video.videoWidth === 0) {
+      showToast(t('ai.needClip'));
+      return;
+    }
+    void ensureAiConsent(t('ai.consentBody')).then((ok) => {
+      if (!ok) return;
+      adjustTarget = tpl;
+      adjustName.textContent = tpl.name;
+      adjustInput.value = '';
+      adjustErr.hidden = true;
+      syncImproveBtn();
+      showModal(adjustDialog);
+    });
+  };
+  adjustInput.addEventListener('input', syncImproveBtn);
+  adjustCancelBtn.addEventListener('click', () => adjustDialog.close());
+  adjustDialog.addEventListener('cancel', (e) => {
+    if (adjusting) e.preventDefault();
+  });
+  improveBtn.addEventListener('click', () => {
+    if (adjusting || !adjustTarget) return;
+    const instruction = adjustInput.value.trim();
+    if (!instruction) return;
+    adjusting = true;
+    syncImproveBtn();
+    const adjustReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    adjustDialog.inert = true;
+    adjustErr.hidden = true;
+    const target = adjustTarget;
+    const aspect = activeClip() ? classifyAspect(canvas.width, canvas.height) : 'vertical';
+    void adjustAiTemplate(effectiveTemplate(target), instruction, aspect).then((result) => {
+      adjusting = false;
+      syncImproveBtn();
+      adjustDialog.inert = false;
+      adjustReturnFocus?.focus();
+      if (typeof result === 'string') {
+        adjustErr.textContent = result === 'net' ? t('ai.errNet') : t('ai.errInvalid');
+        adjustErr.hidden = false;
+        return;
+      }
+      const suffix = getLocale() === 'es' ? ' (IA)' : ' (AI)';
+      insertCustom({ ...result, id: freshTemplateId(), name: `${target.name}${suffix}`.slice(0, 60) });
+      adjustDialog.close();
+    });
   });
   wrap.appendChild(newDialog);
   /** Session customs survive reloads (flattened); the cloud wins on id clash unless local is newer. */
@@ -1459,7 +1782,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (!account) return;
     const cloud = await listCloudTemplates();
     if (!cloud) {
-      setStatus(t('auth.errCloud'));
+      showToast(t('auth.errCloud'));
       return;
     }
     for (const ct of cloud) {
@@ -1516,23 +1839,27 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   };
   const [trimStartInput, trimStartBtn] = mkTrim(t('clip.start'), '⦉ cursor');
   const [trimEndInput, trimEndBtn] = mkTrim(t('clip.end'), 'cursor ⦊');
-  trimStartBtn.addEventListener('click', () => {
-    trimStartInput.value = video.currentTime.toFixed(1);
-    trimStartInput.dispatchEvent(new Event('change'));
+  for (const [input, btn] of [
+    [trimStartInput, trimStartBtn],
+    [trimEndInput, trimEndBtn],
+  ] as const) {
+    btn.addEventListener('click', () => {
+      input.value = video.currentTime.toFixed(1);
+      input.dispatchEvent(new Event('change'));
+    });
+  }
+  const wireTrimInput = (input: HTMLInputElement, apply: (clip: Clip, raw: string) => void): void => {
+    input.addEventListener('change', () => {
+      const clip = activeClip();
+      if (clip) apply(clip, input.value);
+    });
+  };
+  wireTrimInput(trimStartInput, (clip, raw) => {
+    clip.trimStart = Math.max(0, Number(raw) || 0);
   });
-  trimEndBtn.addEventListener('click', () => {
-    trimEndInput.value = video.currentTime.toFixed(1);
-    trimEndInput.dispatchEvent(new Event('change'));
-  });
-  trimStartInput.addEventListener('change', () => {
-    const clip = activeClip();
-    if (clip) clip.trimStart = Math.max(0, Number(trimStartInput.value) || 0);
-  });
-  trimEndInput.addEventListener('change', () => {
-    const clip = activeClip();
-    if (!clip) return;
-    const raw = trimEndInput.value.trim();
-    clip.trimEnd = raw === '' ? null : Math.max(0, Number(raw) || 0);
+  wireTrimInput(trimEndInput, (clip, raw) => {
+    const v = raw.trim();
+    clip.trimEnd = v === '' ? null : Math.max(0, Number(v) || 0);
   });
   clipPanel.appendChild(trimRow);
   const audioLabel = el('label', 'check', t('clip.audio'));
@@ -1564,10 +1891,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     refreshClipInstant(clip);
     if (clip.id === selectedClipId) showRecorded(clip);
     if (!clip.videoCreation) {
-      setStatus(t('clip.tzNoDate'));
+      showToast(t('clip.tzNoDate'));
     } else if (applyAutoOffset(clip)) {
       clip.offsetDirty = true;
-      setStatus(
+      showToast(
         t('clip.tzApplied', {
           tz: tzName(clip.tz),
           name: clip.name,
@@ -1575,7 +1902,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         }),
       );
     } else {
-      setStatus(t('clip.tzNeedActivity'));
+      showToast(t('clip.tzNeedActivity'));
     }
     binMetaSig = '';
   });
@@ -1896,12 +2223,18 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     return widget && widget.visible ? { template, widget } : null;
   };
 
-  const styleOv = (templateId: string, widgetId: string): WidgetStyle => {
-    let per = styleOverrides.get(templateId);
+  /** Get-or-create per-template override map (outer level shared by all override kinds). */
+  const ovMap = <V>(map: Map<string, Map<string, V>>, templateId: string): Map<string, V> => {
+    let per = map.get(templateId);
     if (!per) {
       per = new Map();
-      styleOverrides.set(templateId, per);
+      map.set(templateId, per);
     }
+    return per;
+  };
+
+  const styleOv = (templateId: string, widgetId: string): WidgetStyle => {
+    const per = ovMap(styleOverrides, templateId);
     let ov = per.get(widgetId);
     if (!ov) {
       ov = {};
@@ -1920,11 +2253,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const y = Math.min(Math.max(patch.y ?? box.y, 0), 1);
     const w = Math.min(Math.max(patch.w ?? box.w, MIN_PX_W / W), 1 - x);
     const h = Math.min(Math.max(patch.h ?? box.h, MIN_PX_H / H), 1 - y);
-    let per = layoutOverrides.get(sw.template.id);
-    if (!per) {
-      per = new Map();
-      layoutOverrides.set(sw.template.id, per);
-    }
+    const per = ovMap(layoutOverrides, sw.template.id);
     per.set(sw.widget.id, normToLayout({ x, y, w, h }, W, H));
     bumpRev();
   };
@@ -1947,11 +2276,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   }): void => {
     const sw = selectedWidget();
     if (!sw) return;
-    let per = defOverrides.get(sw.template.id);
-    if (!per) {
-      per = new Map();
-      defOverrides.set(sw.template.id, per);
-    }
+    const per = ovMap(defOverrides, sw.template.id);
     const prev = per.get(sw.widget.id) ?? {};
     per.set(sw.widget.id, { ...prev, ...patch });
     bumpRev();
@@ -2048,11 +2373,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   widthInput.addEventListener('input', () => {
     const sw = selectedWidget();
     if (!sw) return;
-    let per = widthOverrides.get(sw.template.id);
-    if (!per) {
-      per = new Map();
-      widthOverrides.set(sw.template.id, per);
-    }
+    const per = ovMap(widthOverrides, sw.template.id);
     const v = Number(widthInput.value);
     if (v <= 0) per.delete(sw.widget.id);
     else per.set(sw.widget.id, v);
@@ -2075,6 +2396,12 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     widgetTitle.textContent = sw.widget.id;
     widgetSub.textContent = `${sw.widget.kind} · ${sw.widget.metric} · ${sw.widget.layout.ax}/${sw.widget.layout.ay}`;
     setIfIdle(kindSel, sw.widget.kind);
+    // Unoffered-but-valid metrics (AI pace) still display: append once, never offered for picks.
+    if (![...metricSel.options].some((o) => o.value === sw.widget.metric)) {
+      const opt = el('option', undefined, metricLabel(sw.widget.metric));
+      opt.value = sw.widget.metric;
+      metricSel.appendChild(opt);
+    }
     setIfIdle(metricSel, sw.widget.metric);
     fmtRow.hidden = sw.widget.metric !== 'elapsedTime';
     setIfIdle(fmtSel, sw.widget.timeFormat ?? 'auto');
@@ -2085,17 +2412,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     labelRow.hidden = !caps.labelToggle;
     labelCheck.checked = sw.widget.showLabel !== false;
     gearsModeRow.hidden = !caps.gearsMode;
-    for (const btn of gearsModeBtns) {
-      const active = btn.dataset.gearsMode === (sw.widget.gearsMode ?? 'teeth');
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', String(active));
-    }
+    syncSeg(gearsModeBtns, (btn) => btn.dataset.gearsMode === (sw.widget.gearsMode ?? 'teeth'));
     gearsSideRow.hidden = !caps.gearsMode;
-    for (const btn of gearsSideBtns) {
-      const active = btn.dataset.gearsSide === (sw.widget.gearsSide ?? 'both');
-      btn.classList.toggle('active', active);
-      btn.setAttribute('aria-pressed', String(active));
-    }
+    syncSeg(gearsSideBtns, (btn) => btn.dataset.gearsSide === (sw.widget.gearsSide ?? 'both'));
     setIfIdle(xInput, box.x.toFixed(2));
     setIfIdle(yInput, box.y.toFixed(2));
     setIfIdle(wInput, box.w.toFixed(2));
@@ -2224,12 +2543,12 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const gotoApply = (): void => {
     const clip = activeClip();
     if (!clip || !activity || activity.durationSec <= 0) {
-      setStatus(!clip ? t('st.needVideo') : t('act.empty'));
+      showToast(!clip ? t('st.needVideo') : t('act.empty'));
       return;
     }
     const target = parseGotoTime(gotoInput.value);
     if (target === null) {
-      setStatus(t('act.gotoInvalid'));
+      showToast(t('act.gotoInvalid'));
       return;
     }
     const vt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
@@ -2270,9 +2589,20 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   wrap.appendChild(siteFooter);
   root.appendChild(wrap);
 
-  const setStatus = (text: string): void => {
-    status.hidden = false;
-    status.textContent = text;
+  const toastBox = el('div', 'toast-box');
+  toastBox.setAttribute('aria-live', 'polite');
+  wrap.appendChild(toastBox);
+  /** Toasts fired while a dialog is open queue here; tick flushes them once all dialogs close. */
+  const pendingToasts: string[] = [];
+  /** Top-right auto-dismissing toast for action feedback. */
+  const showToast = (text: string): void => {
+    if (wrap.querySelector('dialog[open]')) {
+      pendingToasts.push(text);
+      return;
+    }
+    const node = el('div', 'toast', text);
+    toastBox.appendChild(node);
+    window.setTimeout(() => node.remove(), 4000);
   };
 
   const repaintThumbs = (sample: TelemetrySample): void => {
@@ -2413,7 +2743,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
 
   const removeClip = (id: number): void => {
     if (rendering) {
-      setStatus(t('st.removeBlocked'));
+      showToast(t('st.removeBlocked'));
       return;
     }
     const idx = clips.findIndex((c) => c.id === id);
@@ -2458,7 +2788,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (!clip || clip.offsetDirty) return;
     if (!activity || !clip.videoCreation) {
       if (activity && !clip.videoCreation) {
-        setStatus(
+        showToast(
           t('st.noDate', { name: clip.name }),
         );
       }
@@ -2466,7 +2796,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     }
     const fmt = (d: Date): string => d.toLocaleTimeString(getLocale(), { hour12: false });
     applyAutoOffset(clip);
-    setStatus(
+    showToast(
       t('st.autoOffset', {
         name: clip.name,
         off: formatOffset(clip.offsetSec),
@@ -2517,7 +2847,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       tryAutoSync(clip);
       binMetaSig = '';
     });
-    setStatus(t('st.clipAdded', { name }));
+    showToast(t('st.clipAdded', { name }));
     return clip.id;
   };
 
@@ -2575,7 +2905,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       activityPill.hidden = true;
       renderActivityStats();
       syncActivityTzRow();
-      setStatus(t('st.activityBadType'));
+      showToast(t('st.activityBadType'));
       return;
     }
     try {
@@ -2591,7 +2921,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       activityPill.hidden = true;
       renderActivityStats();
       syncActivityTzRow();
-      setStatus(err instanceof Error ? err.message : t('st.activityUnreadable'));
+      showToast(err instanceof Error ? err.message : t('st.activityUnreadable'));
     }
   };
 
@@ -2607,13 +2937,13 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       void file
         .arrayBuffer()
         .then((buffer) => loadActivityFile(buffer, file.name))
-        .catch(() => setStatus(t('st.activityUnreadable')));
+        .catch(() => showToast(t('st.activityUnreadable')));
     }
   });
 
   if (import.meta.env.DEV) {
     const loadFixtures = (which: 'vert' | 'hz'): void => {
-      setStatus(t('st.loadingFixtures'));
+      showToast(t('st.loadingFixtures'));
       let fixtureId = -1;
       void import('./fixtures.js')
         .then(({ FIXTURE_VIDEO_VERT_URL, FIXTURE_VIDEO_HZ_URL, FIXTURE_FIT_URL }) => {
@@ -2646,7 +2976,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
           });
         })
         .catch((err: unknown) => {
-          setStatus(err instanceof Error ? err.message : t('st.errFixtures'));
+          showToast(err instanceof Error ? err.message : t('st.errFixtures'));
         });
     };
     fixtureVertBtn.addEventListener('click', () => loadFixtures('vert'));
@@ -2656,7 +2986,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   // Sync buttons act on the selected clip.
   const needClip = (): Clip | null => {
     const clip = activeClip();
-    if (!clip) setStatus(t('st.needVideo'));
+    if (!clip) showToast(t('st.needVideo'));
     return clip;
   };
   const autoBtn = el('button', 'btn', t('sync.auto'));
@@ -2666,11 +2996,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const clip = needClip();
     if (!clip) return;
     if (!activity) {
-      setStatus(t('sync.noActivity'));
+      showToast(t('sync.noActivity'));
       return;
     }
     if (!clip.videoCreation) {
-      setStatus(t('sync.noDate'));
+      showToast(t('sync.noDate'));
       return;
     }
     applyAutoOffset(clip);
@@ -2962,11 +3292,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       if (!found) return;
       const box = resolveNorm(found, W, H);
       const { nx, ny } = toNorm(e);
-      let perTemplate = layoutOverrides.get(template.id);
-      if (!perTemplate) {
-        perTemplate = new Map();
-        layoutOverrides.set(template.id, perTemplate);
-      }
+      const perTemplate = ovMap(layoutOverrides, template.id);
       if (drag.mode === 'resize' && drag.corner !== null) {
         const x1 = box.x + box.w;
         const y1 = box.y + box.h;
@@ -3055,7 +3381,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const canPickDir = (): boolean => typeof window.showDirectoryPicker === 'function';
   // In-memory fallback warning: without the pickers above, the whole output is
   // buffered in RAM and long renders may die. Backdrop/Esc count as cancel.
-  const memDialog = el('dialog', 'add-dialog mem-dialog');
+  const memDialog = el('dialog', 'add-dialog');
   memDialog.append(el('h2', undefined, t('r.memH')));
   memDialog.append(el('p', 'muted', t('r.memBody')));
   const memActions = el('div', 'add-actions');
@@ -3073,18 +3399,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     memResolve?.(memDialog.returnValue === 'go');
     memResolve = null;
   });
-  const outsideMemDialog = (e: { clientX: number; clientY: number }): boolean => {
-    const r = memDialog.getBoundingClientRect();
-    return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
-  };
-  let memDownOutside = false;
-  memDialog.addEventListener('pointerdown', (e) => {
-    memDownOutside = outsideMemDialog(e);
-  });
-  memDialog.addEventListener('click', (e) => {
-    if (memDownOutside && outsideMemDialog(e)) memDialog.close();
-    memDownOutside = false;
-  });
+  wireBackdropClose(memDialog);
   const confirmMemoryRender = (): Promise<boolean> =>
     new Promise((resolve) => {
       memResolve = resolve;
@@ -3163,11 +3478,17 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     }
   };
 
+  /** Failed clip render: error state + toast (picker-cancel paths return before this). */
+  const failClip = (clip: Clip, err: unknown): void => {
+    clip.status = 'error';
+    binMetaSig = '';
+    showToast(err instanceof Error ? err.message : t('r.failed'));
+  };
   renderBtn.addEventListener('click', () => {
     if (rendering) return;
     const clip = needClip();
     if (!clip || !activity) {
-      if (!activity) setStatus(t('sync.noActivity'));
+      if (!activity) showToast(t('sync.noActivity'));
       return;
     }
     void (async () => {
@@ -3191,12 +3512,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       try {
         await renderOne(clip, t('r.tagOne'), save);
         progressLabel.textContent = '';
-        setStatus(t('r.doneOne', { name: outputName(clip) }));
+        showToast(t('r.doneOne', { name: outputName(clip) }));
       } catch (err: unknown) {
         if (save) await abortSave(save);
-        clip.status = 'error';
-        binMetaSig = '';
-        setStatus(err instanceof Error ? err.message : t('r.failed'));
+        failClip(clip, err);
         progressLabel.textContent = '';
       } finally {
         setRendering(false);
@@ -3207,11 +3526,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   renderAllBtn.addEventListener('click', () => {
     if (rendering) return;
     if (clips.length === 0) {
-      setStatus(t('st.needVideo'));
+      showToast(t('st.needVideo'));
       return;
     }
     if (!activity) {
-      setStatus(t('sync.noActivity'));
+      showToast(t('sync.noActivity'));
       return;
     }
     void (async () => {
@@ -3250,9 +3569,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
               const fileHandle = await dir.getFileHandle(name, { create: true });
               save = { stream: await fileHandle.createWritable(), name };
             } catch (err) {
-              clip.status = 'error';
-              binMetaSig = '';
-              setStatus(err instanceof Error ? err.message : t('r.failed'));
+              failClip(clip, err);
               break;
             }
           }
@@ -3261,14 +3578,12 @@ export async function renderApp(root: HTMLElement): Promise<void> {
             done += 1;
           } catch (err) {
             if (save) await abortSave(save);
-            clip.status = 'error';
-            binMetaSig = '';
-            setStatus(err instanceof Error ? err.message : t('r.failed'));
+            failClip(clip, err);
             break;
           }
         }
         progressLabel.textContent = '';
-        if (done === clips.length) setStatus(t('r.doneN', { done }));
+        if (done === clips.length) showToast(t('r.doneN', { done }));
       } finally {
         setRendering(false);
       }
@@ -3276,7 +3591,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   });
 
   video.addEventListener('error', () => {
-    setStatus(t('st.videoDecode'));
+    showToast(t('st.videoDecode'));
   });
 
   video.addEventListener('loadedmetadata', () => {
@@ -3352,6 +3667,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   let lastLiveSig = '';
   const tick = (): void => {
     const clip = activeClip();
+    if (pendingToasts.length > 0 && !wrap.querySelector('dialog[open]')) {
+      for (const text of pendingToasts.splice(0)) showToast(text);
+    }
     const offsetSec = clip?.offsetSec ?? 0;
     const vt = Number.isFinite(video.currentTime) ? video.currentTime : 0;
     if (!scrubbing && Number.isFinite(video.duration)) {
@@ -3446,10 +3764,14 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   syncBin();
   void bootAccount();
   // Late webfonts would otherwise stick on fallback glyphs behind the paint gates.
-  void document.fonts?.ready.then(() => {
+  // ready() is one-shot for startup fonts; loadingdone re-arms for families first
+  // used later (AI templates), when a paused preview would never repaint.
+  const bustPaintGates = (): void => {
     lastLiveSig = '';
     lastOverviewSig = '';
     for (const th of thumbs) th.sig = '';
-  });
+  };
+  void document.fonts?.ready.then(bustPaintGates);
+  document.fonts?.addEventListener('loadingdone', bustPaintGates);
   requestAnimationFrame(tick);
 }

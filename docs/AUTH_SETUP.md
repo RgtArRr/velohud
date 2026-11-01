@@ -49,9 +49,10 @@ npm run db:apply:local --workspace=api
 wrangler d1 migrations apply velohud-db --config api/wrangler.toml
 ```
 
-Migraciones: `0002_auth.sql` (tablas Auth.js + `user_templates`),
-`0003_credentials.sql` (hash local), `0004_provider_keys.sql` (API keys
-cifradas).
+Migraciones: `0001_init.sql` (base), `0002_auth.sql` (tablas Auth.js +
+`user_templates`), `0003_credentials.sql` (hash local),
+`0004_provider_keys.sql` (API keys cifradas), `0005_auth_throttle.sql`
+(throttle por IP), `0006_users_email_unique.sql` (email único).
 
 ## 3. Probar
 

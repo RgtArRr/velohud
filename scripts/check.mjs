@@ -5,6 +5,16 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { activityFromIntervalsStreams, activityFromTrackPoints, buildActivity, activityStartFromOffset, fillDerivedGrade, formatFixedZone, formatInZone, formatUtc, parseActivityStart, zoneOffsetHours, zoneOffsetName, nextProfileWindow, parseFit, parseGotoTime, sampleAt, summarize, widgetValue, zonedTimeToUtc } from '../web/src/telemetry.ts';
 import { hashPassword, needsRehash, normalizeEmail, storedIterations, validatePassword, verifyPassword } from '../api/src/password.ts';
+import {
+  AUTO_JSON_SCHEMA,
+  TEMPLATE_JSON_SCHEMA,
+  buildAdjustSystemPrompt,
+  buildAutoSystemPrompt,
+  buildSystemPrompt,
+  extractJson,
+  extractOutputText,
+  parseAiTemplate,
+} from '../api/src/ai.ts';
 import { STRINGS, resolveLocale, setLocale, t } from '../web/src/i18n.ts';
 import {
   GUIDES,
@@ -304,6 +314,12 @@ const probe = { t: 999, speed: 10, heartRate: 150 };
 assert.equal(widgetValue('elapsedTime', probe), 999);
 assert.equal(widgetValue('speed', probe), 10);
 assert.equal(widgetValue('power', probe), undefined);
+// Pace exists (derived, imperial-aware) but is not offered anywhere yet.
+assert.equal(widgetValue('pace', { t: 0, speed: 1000 / 300 }), 300);
+assert.equal(widgetValue('pace', { t: 0, speed: 0 }), undefined);
+assert.equal(widgetValue('pace', { t: 0 }), undefined);
+assert.deepEqual(formatMetric('pace', 300, 'metric'), { value: '5:00', unit: '/km' });
+assert.deepEqual(formatMetric('pace', 300, 'imperial'), { value: '8:02', unit: '/mi' });
 
 // Widget catalog + factory (right panel: add widget, switch metric/kind).
 const kindValues = WIDGET_KINDS;
@@ -603,6 +619,17 @@ const legacy = JSON.stringify({
   widgets: [{ id: 'a', kind: 'stat', metric: 'speed', layout: { vertical: { x: 0, y: 0, w: 1, h: 1 } } }],
 });
 assert.throws(() => parseTemplateJson(legacy), /legacy template/);
+const badVersion = JSON.stringify({
+  name: 't',
+  schemaVersion: 2,
+  widgets: [{ id: 'a', kind: 'stat', metric: 'speed', layout: { ax: 'left', ay: 'top', px: 0, py: 0, w: 10, h: 10 } }],
+});
+assert.throws(() => parseTemplateJson(badVersion), /legacy template/);
+const v1shape = JSON.stringify({
+  name: 't',
+  widgets: [{ id: 'a', metric: 'speed', layout: { vertical: { x: 0, y: 0, w: 1, h: 1 } } }],
+});
+assert.throws(() => parseTemplateJson(v1shape), /legacy template/);
 
 // Custom labels are stripped: overlay text is hardcoded English.
 const stripped = parseTemplateJson(
@@ -671,6 +698,62 @@ assert.equal(gradeAngle(100), Math.PI / 4);
 assert.equal(gradeAngle(-200), -Math.PI / 4);
 assert.ok(gradeAngle(-50) < 0 && gradeAngle(50) > 0);
 
+// AI helpers: extraction, output shapes, naming, prompt constraints.
+assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
+assert.equal(extractJson('  {"a":1}  '), '{"a":1}');
+assert.equal(extractJson('nope'), null);
+assert.equal(extractOutputText('raw'), 'raw');
+assert.equal(extractOutputText({ output_text: 'x' }), 'x');
+assert.equal(extractOutputText({ output: [{ content: [{ text: 'a' }, { text: 'b' }] }] }), 'ab');
+assert.equal(extractOutputText({ choices: [{ message: { content: 'c' } }] }), 'c');
+assert.equal(extractOutputText({ nope: 1 }), null);
+const aiTpl = parseAiTemplate('```json\n{"name":"Cronos","widgets":[]}\n```');
+assert.equal(aiTpl.name, 'Cronos');
+assert.throws(() => parseAiTemplate('garbage'), /not a template/);
+assert.throws(
+  () =>
+    parseAiTemplate(
+      JSON.stringify({
+        name: 't',
+        widgets: [{ id: 'a', kind: 'stat', metric: 'speed', layout: { vertical: {} } }],
+      }),
+    ),
+  /legacy template/,
+);
+assert.ok(buildSystemPrompt().includes('in ENGLISH'));
+assert.ok(buildSystemPrompt().includes("always set shape 'none'"));
+assert.ok(buildSystemPrompt().includes('"Baloo 2"'));
+assert.ok(buildSystemPrompt('horizontal').includes('HORIZONTAL (1280x720)'));
+assert.ok(buildSystemPrompt().includes('VERTICAL (720x1280)'));
+// Constrained-decoding schema: no invented keys (esp. `label`), 1-8 widgets.
+assert.equal(TEMPLATE_JSON_SCHEMA.additionalProperties, false);
+assert.deepEqual(TEMPLATE_JSON_SCHEMA.required, ['schemaVersion', 'id', 'name', 'theme', 'widgets']);
+assert.equal(TEMPLATE_JSON_SCHEMA.properties.widgets.minItems, 1);
+assert.equal(TEMPLATE_JSON_SCHEMA.properties.widgets.maxItems, 8);
+assert.equal(TEMPLATE_JSON_SCHEMA.properties.widgets.items.additionalProperties, false);
+assert.ok(
+  TEMPLATE_JSON_SCHEMA.properties.widgets.items.properties.style.properties.labelFont.enum.includes(
+    '"Baloo 2", sans-serif',
+  ),
+);
+assert.ok(TEMPLATE_JSON_SCHEMA.properties.widgets.items.properties.metric.enum.includes('pace'));
+assert.ok(buildSystemPrompt().includes('min/km for running'));
+// Adjust variant: full object back, preserve the untouched.
+assert.ok(buildAdjustSystemPrompt().includes('FULL updated'));
+assert.ok(buildAdjustSystemPrompt().includes('Preserve everything'));
+assert.ok(buildAdjustSystemPrompt().includes('byte-for-byte identical'));
+// Auto mode: black/white colors only, base schema untouched.
+assert.deepEqual(AUTO_JSON_SCHEMA.properties.theme.properties.text.enum, ['#ffffff', '#000000']);
+assert.deepEqual(
+  AUTO_JSON_SCHEMA.properties.widgets.items.properties.style.properties.background.enum,
+  ['#ffffff', '#000000'],
+);
+assert.equal('enum' in TEMPLATE_JSON_SCHEMA.properties.theme.properties.text, false);
+assert.ok(buildAutoSystemPrompt().includes('video frame'));
+assert.ok(buildAutoSystemPrompt().includes('white text'));
+assert.ok(buildAutoSystemPrompt().includes('NEVER describe the video content'));
+assert.ok(buildAdjustSystemPrompt('square').includes('SQUARE (720x720)'));
+
 // resolve: same vmin numbers render identical pixels on both orientations.
 const sq = { ax: 'left', ay: 'top', px: 0, py: 0, w: 25, h: 25 };
 assert.deepEqual(resolveLayout(sq, 1000, 800), { x: 0, y: 0, w: 200, h: 200 });
@@ -711,6 +794,8 @@ assert.ok(appIndex.includes('type="module"'), 'app boots JS');
 const appCsp = cspOf(appIndex);
 assert.ok(appCsp.includes("script-src 'self' https://static.cloudflareinsights.com"), 'app csp beacon script');
 assert.ok(appCsp.includes('https://cloudflareinsights.com'), 'app csp beacon connect');
+assert.ok(!appCsp.includes('localhost:8787') && !appCsp.includes('127.0.0.1'), 'app csp drops dev origins');
+assert.ok(!appCsp.includes('ws:') && !appCsp.includes('wss:'), 'app csp drops ws');
 const firstGuideHtml = readFileSync(
   join(distDir, guidePath('es', GUIDES[0]).replace(/^\/|\/$/g, ''), 'index.html'),
   'utf8',
@@ -873,4 +958,13 @@ for (const css of readdirSync(join(distDir, 'assets')).filter((f) => f.endsWith(
   assert.ok(!body.includes('fonts.googleapis.com'), `no google fonts in ${css}`);
 }
 
-console.log(`check passed: fit(120 samples) + aspects + ${files.length} templates + mvhd + widgets + catalog(${kindValues.length} kinds) + profwin + i18n + tpljson + seo(${locs.length} urls)`);
+// Late webfonts (e.g. AI-picked families) must bust the paint gates when they
+// arrive, or a paused preview sticks on fallback glyphs until the next click.
+const appSrc = readFileSync(join(root, 'web', 'src', 'app.ts'), 'utf8');
+assert.ok(
+  appSrc.includes(`document.fonts?.addEventListener('loadingdone'`),
+  'app repaints when late webfonts arrive',
+);
+assert.ok(appSrc.includes(`lastLiveSig = ''`), 'font arrival resets the live paint gate');
+
+console.log(`check passed: fit(120 samples) + aspects + ${files.length} templates + mvhd + widgets + catalog(${kindValues.length} kinds) + profwin + i18n + tpljson + seo(${locs.length} urls) + fontgate`);

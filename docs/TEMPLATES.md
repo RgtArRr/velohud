@@ -27,8 +27,8 @@ nothing more.
 ```jsonc
 {
   "id": "speed",           // unique within the template
-  "metric": "speed",       // speed|heartRate|power|cadence|elevation|distance|elapsedTime|grade|vam|gears|none
-  "kind": "gauge",         // stat|number|gauge|speedo|ring|slope|gears|spark|profile|vam|map|navmap|compass (required)
+  "metric": "speed",       // speed|pace|heartRate|power|cadence|elevation|distance|elapsedTime|grade|vam|gears|none (pace = min/km, only when asked)
+  "kind": "gauge",         // stat|number|gauge|speedo|ring|slope|gears|spark|profile|profilenext|vam|map|navmap|compass (required)
   "visible": true,
   "showUnit": true,        // optional, default true
   "showLabel": true,       // optional, default true
@@ -143,6 +143,8 @@ Map every spatial request to the widget-level `layout` (move/resize the box):
 - "text further from the gauge" → a taller box (`h`); a short box crowds
   label, graphics and value by design, and resizing is the intended fix.
 - Never add fields like `labelOffset`/`paddingTop`: unknown keys are stripped.
+- The + card (blank, import, AI, auto) needs a loaded video: the target aspect comes from its metadata. Auto designs from the current frame with no prompt (black/white only).
+- Auto mode sends the current video frame and constrains colors to black/white by schema.
 
 ## Fonts
 

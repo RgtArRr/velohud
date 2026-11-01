@@ -13,7 +13,7 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const MIN_LENGTH = 10;
 const MAX_LENGTH = 128;
 
-export type PasswordError = 'email' | 'weak' | 'mismatch';
+export type PasswordError = 'email' | 'weak';
 
 export function normalizeEmail(email: unknown): string | null {
   if (typeof email !== 'string') return null;

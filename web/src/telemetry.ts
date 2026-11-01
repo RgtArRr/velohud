@@ -1,5 +1,6 @@
 import { Decoder, Stream } from '@garmin/fitsdk';
 import { t } from './i18n.js';
+import { EARTH_RADIUS_M } from './geo.js';
 import type { RecordMesg } from '@garmin/fitsdk';
 import type { MetricId } from '@velohud/shared';
 
@@ -34,24 +35,18 @@ export interface ActivitySummary {
   durationSec: number;
   distanceM: number;
   avgSpeed: number | null;
-  maxSpeed: number | null;
   avgHeartRate: number | null;
-  maxHeartRate: number | null;
   avgPower: number | null;
-  elevationGain: number | null;
 }
 
 const SEMI_TO_DEG = 180 / 2 ** 31;
 
-/**
- * Interprets a wall reading ('YYYY-MM-DDTHH:mm:ss') in an IANA zone as a UTC
- * instant, via one format round-trip (DST-safe: the offset is read at that
- * instant). Null on bad input or unknown zone.
- */
-export function zonedTimeToUtc(wall: string, timeZone: string): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(wall);
+/** 'YYYY-MM-DDTHH:mm:ss' wall reading -> UTC ms of the same face values; null when malformed. */
+const WALL_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/;
+function parseWall(wall: string): number | null {
+  const m = WALL_RE.exec(wall);
   if (!m) return null;
-  const asUtc = Date.UTC(
+  return Date.UTC(
     Number(m[1]),
     Number(m[2]) - 1,
     Number(m[3]),
@@ -59,26 +54,46 @@ export function zonedTimeToUtc(wall: string, timeZone: string): Date | null {
     Number(m[5]),
     Number(m[6] ?? '0'),
   );
+}
+
+/**
+ * Zoned date-time parts of an instant ('24' midnight normalized to '00').
+ * Throws on an unknown zone, like the Intl block it replaces.
+ */
+function zonedParts(ms: number, timeZone: string): Record<string, string> {
+  const dtf = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    hour12: false,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+  const parts: Record<string, string> = {};
+  for (const p of dtf.formatToParts(new Date(ms))) {
+    if (p.type !== 'literal') parts[p.type] = p.value;
+  }
+  if (parts['hour'] === '24') parts['hour'] = '00';
+  return parts;
+}
+
+/**
+ * Interprets a wall reading ('YYYY-MM-DDTHH:mm:ss') in an IANA zone as a UTC
+ * instant, via one format round-trip (DST-safe: the offset is read at that
+ * instant). Null on bad input or unknown zone.
+ */
+export function zonedTimeToUtc(wall: string, timeZone: string): Date | null {
+  const asUtc = parseWall(wall);
+  if (asUtc === null) return null;
   try {
-    const dtf = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      hour12: false,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-    const parts: Record<string, string> = {};
-    for (const p of dtf.formatToParts(new Date(asUtc))) {
-      if (p.type !== 'literal') parts[p.type] = p.value;
-    }
+    const parts = zonedParts(asUtc, timeZone);
     const back = Date.UTC(
       Number(parts['year']),
       Number(parts['month']) - 1,
       Number(parts['day']),
-      Number(parts['hour'] === '24' ? '0' : parts['hour']),
+      Number(parts['hour']),
       Number(parts['minute']),
       Number(parts['second']),
     );
@@ -109,7 +124,7 @@ const haversineM = (lat1: number, lon1: number, lat2: number, lon2: number): num
   const a =
     Math.sin(r(lat2 - lat1) / 2) ** 2 +
     Math.cos(r(lat1)) * Math.cos(r(lat2)) * Math.sin(r(lon2 - lon1) / 2) ** 2;
-  return 2 * 6371000 * Math.asin(Math.sqrt(a));
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(a));
 };
 
 /**
@@ -210,19 +225,59 @@ const set = <K extends 'lat' | 'lon' | 'ele' | 'dist' | 'hr' | 'cad' | 'watts' |
   if (value !== undefined) p[key] = value;
 };
 
+type TrackField = 'lat' | 'lon' | 'ele' | 'dist' | 'hr' | 'cad' | 'watts' | 'speed';
+type TagText = (el: Element, tag: string) => string | null;
+/** One tag->field extraction row: read tag text via get, coerce, store (map adjusts). */
+interface TagRow {
+  key: TrackField;
+  tag: string;
+  get: TagText;
+  map?: (n: number) => number;
+}
+const applyTagRows = (p: TrackPoint, el: Element, rows: readonly TagRow[]): void => {
+  for (const row of rows) {
+    const v = num(row.get(el, row.tag));
+    set(p, row.key, v === undefined || row.map === undefined ? v : row.map(v));
+  }
+};
+
+/** Attribute text as a TagText (GPX lat/lon live on the trkpt itself). */
+const attrText = (el: Element, tag: string): string | null => el.getAttribute(tag);
+
+/** Nested '<tag><Value>' text (TCX HeartRateBpm). */
+const nestedValue = (el: Element, tag: string): string | null => {
+  const inner = Array.from(el.children).find((c) => c.localName === tag);
+  return inner ? childText(inner, 'Value') : null;
+};
+
+const GPX_ROWS: readonly TagRow[] = [
+  { key: 'lat', tag: 'lat', get: attrText },
+  { key: 'lon', tag: 'lon', get: attrText },
+  { key: 'ele', tag: 'ele', get: childText },
+  { key: 'hr', tag: 'hr', get: descText },
+  { key: 'cad', tag: 'cad', get: descText },
+  { key: 'watts', tag: 'power', get: descText },
+  { key: 'speed', tag: 'speed', get: descText },
+];
+
+/** TCX rows; running cadence counts both feet, so rpm halves it (map). */
+const tcxRows = (halveCadence: boolean): readonly TagRow[] => [
+  { key: 'lat', tag: 'LatitudeDegrees', get: descText },
+  { key: 'lon', tag: 'LongitudeDegrees', get: descText },
+  { key: 'ele', tag: 'AltitudeMeters', get: childText },
+  { key: 'dist', tag: 'DistanceMeters', get: childText },
+  { key: 'hr', tag: 'HeartRateBpm', get: nestedValue },
+  { key: 'cad', tag: 'Cadence', get: childText, map: halveCadence ? (n) => n / 2 : undefined },
+  { key: 'watts', tag: 'Watts', get: descText },
+];
+
 function extractGpx(doc: Document): TrackPoint[] {
   const points: TrackPoint[] = [];
   for (const el of Array.from(doc.getElementsByTagName('trkpt'))) {
     const time = Date.parse(childText(el, 'time') ?? '');
     if (!Number.isFinite(time)) continue;
     const p: TrackPoint = { time };
-    set(p, 'lat', num(el.getAttribute('lat')));
-    set(p, 'lon', num(el.getAttribute('lon')));
-    set(p, 'ele', num(childText(el, 'ele')));
-    set(p, 'hr', num(descText(el, 'hr')));
-    set(p, 'cad', num(descText(el, 'cad')));
-    set(p, 'watts', num(descText(el, 'power')));
-    set(p, 'speed', num(descText(el, 'speed')));
+    applyTagRows(p, el, GPX_ROWS);
     points.push(p);
   }
   return points;
@@ -230,19 +285,12 @@ function extractGpx(doc: Document): TrackPoint[] {
 
 function extractTcx(doc: Document, halveCadence: boolean): TrackPoint[] {
   const points: TrackPoint[] = [];
+  const rows = tcxRows(halveCadence);
   for (const el of Array.from(doc.getElementsByTagName('Trackpoint'))) {
     const time = Date.parse(childText(el, 'Time') ?? '');
     if (!Number.isFinite(time)) continue;
     const p: TrackPoint = { time };
-    set(p, 'lat', num(descText(el, 'LatitudeDegrees')));
-    set(p, 'lon', num(descText(el, 'LongitudeDegrees')));
-    set(p, 'ele', num(childText(el, 'AltitudeMeters')));
-    set(p, 'dist', num(childText(el, 'DistanceMeters')));
-    const hrEl = Array.from(el.children).find((c) => c.localName === 'HeartRateBpm');
-    set(p, 'hr', num(hrEl ? childText(hrEl, 'Value') : null));
-    const cad = num(childText(el, 'Cadence'));
-    set(p, 'cad', cad === undefined ? undefined : halveCadence ? cad / 2 : cad);
-    set(p, 'watts', num(descText(el, 'Watts')));
+    applyTagRows(p, el, rows);
     points.push(p);
   }
   return points;
@@ -489,17 +537,35 @@ const NUMERIC_KEYS = [
 /** Discrete fields: step-held from the left sample, never interpolated. */
 const STEP_KEYS = ['frontGear', 'rearGear', 'frontGearNum', 'rearGearNum'] as const;
 
+/**
+ * First index with t >= target over ascending-t samples (classic lower bound;
+ * samples.length when every sample precedes it, 0 when empty or t leads all).
+ */
+export function lowerBound(samples: readonly { t: number }[], t: number): number {
+  let lo = 0;
+  let hi = samples.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 /** Interpolated sample at time t (clamped to the activity range). */
 export function sampleAt(activity: Activity, t: number): TelemetrySample {
   const { samples } = activity;
   const clamped = Math.min(Math.max(t, 0), activity.durationSec);
-  let lo = 0;
-  let hi = samples.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi + 1) >> 1;
-    if (samples[mid].t <= clamped) lo = mid;
-    else hi = mid - 1;
+  // Last sample at-or-before t: lowerBound lands on the first sample
+  // at-or-after t, so step back past it unless it sits exactly on t, then
+  // advance over equals (ties resolve to the last sample at t, as before).
+  let lo = lowerBound(samples, clamped);
+  if (lo === samples.length || samples[lo].t > clamped) {
+    lo -= 1;
+  } else {
+    while (lo + 1 < samples.length && samples[lo + 1].t <= clamped) lo += 1;
   }
+  if (lo < 0) lo = 0;
   const a = samples[lo];
   const b = samples[Math.min(lo + 1, samples.length - 1)];
   const span = b.t - a.t;
@@ -526,30 +592,15 @@ export function summarize(activity: Activity): ActivitySummary {
     samples.map(pick).filter((v): v is number => typeof v === 'number');
   const avg = (xs: number[]): number | null =>
     xs.length > 0 ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
-  const max = (xs: number[]): number | null => {
-    if (xs.length === 0) return null;
-    let m = xs[0];
-    for (let i = 1; i < xs.length; i++) if (xs[i] > m) m = xs[i];
-    return m;
-  };
 
-  const elev = nums((s) => s.elevation);
-  let gain: number | null = null;
-  if (elev.length > 1) {
-    gain = 0;
-    for (let i = 1; i < elev.length; i++) gain += Math.max(0, elev[i] - elev[i - 1]);
-  }
   const dist = nums((s) => s.distance);
   return {
     samples: samples.length,
     durationSec: activity.durationSec,
     distanceM: dist.length > 0 ? dist[dist.length - 1] - dist[0] : 0,
     avgSpeed: avg(nums((s) => s.speed)),
-    maxSpeed: max(nums((s) => s.speed)),
     avgHeartRate: avg(nums((s) => s.heartRate)),
-    maxHeartRate: max(nums((s) => s.heartRate)),
     avgPower: avg(nums((s) => s.power)),
-    elevationGain: gain,
   };
 }
 
@@ -579,14 +630,8 @@ export function nextProfileWindow(
   if (samples.length === 0) return null;
   const xk = (s: TelemetrySample): number | undefined => (useDist ? s.distance : s.t);
   // Right edge: first sample at least 5 min ahead, else the ride end.
-  let lo = 0;
-  let hi = samples.length;
   const target = nowT + PROFILE_NEXT_AHEAD_SEC;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (samples[mid].t < target) lo = mid + 1;
-    else hi = mid;
-  }
+  const lo = lowerBound(samples, target);
   const xMax = xk(samples[Math.min(lo, samples.length - 1)]);
   // Left edge: ~0.5 km behind the dot, clamped to the ride start.
   let xMin = nowX - (useDist ? PROFILE_NEXT_BEHIND_M : PROFILE_NEXT_BEHIND_SEC);
@@ -608,24 +653,36 @@ export function widgetValue(
   sample: TelemetrySample,
 ): number | undefined {
   if (metric === 'elapsedTime') return sample.t;
+  // Pace derives from speed (sec/km); stopped/missing speed has no pace.
+  if (metric === 'pace') return sample.speed && sample.speed > 0 ? 1000 / sample.speed : undefined;
   // Computed (vam), composite (gears) or absent (none): custom kinds read history directly.
   if (metric === 'vam' || metric === 'gears' || metric === 'none') return undefined;
   return sample[metric];
 }
 
-export function formatClock(totalSec: number): string {
+/**
+ * Shared h/m/s split of clamped whole seconds: h (hours), m (total minutes),
+ * mm/ss (zero-padded minute-of-hour/second). formatClock reads m + ss; the
+ * span formatters read h + mm + ss.
+ */
+export function splitHMS(totalSec: number): { h: number; m: number; mm: string; ss: string } {
   const s = Math.max(0, Math.floor(totalSec));
-  const mm = String(Math.floor(s / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
-  return `${mm}:${ss}`;
+  return {
+    h: Math.floor(s / 3600),
+    m: Math.floor(s / 60),
+    mm: String(Math.floor((s % 3600) / 60)).padStart(2, '0'),
+    ss: String(s % 60).padStart(2, '0'),
+  };
+}
+
+export function formatClock(totalSec: number): string {
+  const { m, ss } = splitHMS(totalSec);
+  return `${String(m).padStart(2, '0')}:${ss}`;
 }
 
 /** h:mm:ss past the hour, mm:ss below it. For activity-scale spans. */
 export function formatSpan(totalSec: number): string {
-  const s = Math.max(0, Math.floor(totalSec));
-  const h = Math.floor(s / 3600);
-  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
+  const { h, mm, ss } = splitHMS(totalSec);
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
@@ -660,25 +717,14 @@ export function formatUtc(date: Date): string {
 function zonedWall(date: Date, timeZone: string): { text: string; wallMs: number } | null {
   if (!Number.isFinite(date.getTime())) return null;
   try {
-    const parts = new Intl.DateTimeFormat('en-CA', {
-      timeZone,
-      hour12: false,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    }).formatToParts(date);
-    const get = (type: string): string => parts.find((p) => p.type === type)?.value ?? '';
-    const y = Number(get('year'));
-    const mo = Number(get('month'));
-    const d = Number(get('day'));
-    let h = get('hour');
-    const mi = Number(get('minute'));
-    const s = Number(get('second'));
+    const parts = zonedParts(date.getTime(), timeZone);
+    const y = Number(parts['year']);
+    const mo = Number(parts['month']);
+    const d = Number(parts['day']);
+    const h = parts['hour'] ?? '';
+    const mi = Number(parts['minute']);
+    const s = Number(parts['second']);
     if (!y || !mo || !d || !h || !Number.isFinite(mi) || !Number.isFinite(s)) return null;
-    if (h === '24') h = '00';
     const wallMs = Date.UTC(y, mo - 1, d, Number(h), mi, s);
     const pad = (n: number): string => String(n).padStart(2, '0');
     return { text: `${y}-${pad(mo)}-${pad(d)} ${pad(Number(h))}:${pad(mi)}:${pad(s)}`, wallMs };
@@ -729,17 +775,9 @@ export function formatFixedZone(date: Date, tzHours: number): string {
  * fixed UTC offset in hours. Null on bad input.
  */
 export function activityStartFromOffset(wall: string, offsetHours: number): Date | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(wall);
-  if (!m || !Number.isFinite(offsetHours)) return null;
-  const ms =
-    Date.UTC(
-      Number(m[1]),
-      Number(m[2]) - 1,
-      Number(m[3]),
-      Number(m[4]),
-      Number(m[5]),
-      Number(m[6] ?? '0'),
-    ) - offsetHours * 3600e3;
+  const asUtc = parseWall(wall);
+  if (asUtc === null || !Number.isFinite(offsetHours)) return null;
+  const ms = asUtc - offsetHours * 3600e3;
   return Number.isNaN(ms) ? null : new Date(ms);
 }
 

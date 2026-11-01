@@ -6,6 +6,7 @@ export type AspectClass = 'vertical' | 'square' | 'horizontal';
 
 export type MetricId =
   | 'speed'
+  | 'pace'
   | 'heartRate'
   | 'power'
   | 'cadence'
@@ -55,6 +56,7 @@ export const WIDGET_KINDS: readonly WidgetKind[] = [
 
 export const METRIC_IDS: readonly MetricId[] = [
   'speed',
+  'pace',
   'heartRate',
   'power',
   'cadence',
@@ -288,6 +290,11 @@ const isFiniteNumber = (value: unknown): value is number =>
 const pickString = (value: unknown, allowed: readonly string[]): string | undefined =>
   typeof value === 'string' && allowed.includes(value) ? value : undefined;
 
+/** True for an exact [number, number] pair of finite numbers (WidgetDef.range shape). */
+export function isRangePair(v: unknown): v is [number, number] {
+  return Array.isArray(v) && v.length === 2 && isFiniteNumber(v[0]) && isFiniteNumber(v[1]);
+}
+
 /** Gauge scale: a [min, max] pair of finite numbers, else absent (theme default). */
 const normalizeRange = (value: unknown): [number, number] | undefined => {
   if (!Array.isArray(value) || value.length !== 2) return undefined;
@@ -333,12 +340,18 @@ export function parseTemplateJson(text: string): Template {
     throw new Error('not a template');
   }
   const rec = raw as Record<string, unknown>;
+  if (rec.schemaVersion !== undefined && rec.schemaVersion !== TEMPLATE_SCHEMA_VERSION) {
+    throw new Error('legacy template');
+  }
   if (typeof rec.name !== 'string' || !Array.isArray(rec.widgets)) {
     throw new Error('not a template');
   }
   for (const w of rec.widgets) {
     if (typeof w !== 'object' || w === null) throw new Error('not a template');
     const widget = w as Record<string, unknown>;
+    if (!isLayout(widget.layout)) {
+      throw new Error(isLegacyLayout(widget.layout) ? 'legacy template' : 'not a template');
+    }
     if (
       typeof widget.kind !== 'string' ||
       !(WIDGET_KINDS as readonly string[]).includes(widget.kind)
@@ -350,9 +363,6 @@ export function parseTemplateJson(text: string): Template {
       !(METRIC_IDS as readonly string[]).includes(widget.metric)
     ) {
       throw new Error('not a template');
-    }
-    if (!isLayout(widget.layout)) {
-      throw new Error(isLegacyLayout(widget.layout) ? 'legacy template' : 'not a template');
     }
   }
   const theme =

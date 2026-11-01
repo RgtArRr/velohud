@@ -1,13 +1,22 @@
-import { TEMPLATE_SCHEMA_VERSION, parseTemplateJson } from '@velohud/shared';
+import { TEMPLATE_SCHEMA_VERSION, parseTemplateJson, type AspectClass } from '@velohud/shared';
+import {
+  AI_DEFAULT_MODEL,
+  AUTO_JSON_SCHEMA,
+  buildAdjustSystemPrompt,
+  buildAutoSystemPrompt,
+  buildSystemPrompt,
+  generateTemplateJson,
+  parseAiTemplate,
+} from './ai.js';
 import {
   SESSION_MAX_AGE,
   buildSessionCookie,
   deleteSession,
-  expireSessionCookie,
   getSessionUser,
   handleAuth,
   webOrigins,
   type AuthEnv,
+  type SessionUser,
 } from './auth.js';
 import {
   dummyVerify,
@@ -28,6 +37,9 @@ import {
 
 interface Env extends AuthEnv {
   DB: D1Database;
+  AI_MODEL?: string;
+  AI_ENDPOINT?: string;
+  AI_KEY?: string;
 }
 
 const NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -75,20 +87,24 @@ const assertOrigin = (request: Request, env: Env): boolean => {
   return !origin || webOrigins(env).includes(origin);
 };
 
-/** 20 auth attempts per IP per 10 minutes. Absent IP (local dev) skips. */
+/** 20 attempts per route bucket per IP per 10 minutes. Missing IP falls back to x-forwarded-for, else a shared key (always throttled). */
 const AUTH_WINDOW_SEC = 600;
 const AUTH_MAX_ATTEMPTS = 20;
 
 async function authThrottled(
   env: Env,
   request: Request,
+  bucket: string,
 ): Promise<{ throttled: boolean; retryAfter: number }> {
-  const ip = request.headers.get('cf-connecting-ip')?.trim();
-  if (!ip) return { throttled: false, retryAfter: 0 };
+  const ip =
+    request.headers.get('cf-connecting-ip')?.trim() ||
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    'unknown';
+  const key = `${bucket}:${ip}`;
   const now = Math.floor(Date.now() / 1000);
   await env.DB.prepare('DELETE FROM auth_attempts WHERE reset_at < ?').bind(now).run();
   const row = await env.DB.prepare('SELECT count, reset_at FROM auth_attempts WHERE ip = ?')
-    .bind(ip)
+    .bind(key)
     .first<Record<string, unknown>>();
   const count = typeof row?.['count'] === 'number' ? row['count'] : 0;
   const reset = typeof row?.['reset_at'] === 'number' ? row['reset_at'] : 0;
@@ -99,7 +115,7 @@ async function authThrottled(
   await env.DB.prepare(
     'INSERT INTO auth_attempts (ip, count, reset_at) VALUES (?, ?, ?) ON CONFLICT (ip) DO UPDATE SET count = excluded.count, reset_at = excluded.reset_at',
   )
-    .bind(ip, fresh ? 1 : count + 1, fresh ? now + AUTH_WINDOW_SEC : reset)
+    .bind(key, fresh ? 1 : count + 1, fresh ? now + AUTH_WINDOW_SEC : reset)
     .run();
   return { throttled: false, retryAfter: 0 };
 }
@@ -109,6 +125,67 @@ const throttleResponse = (retryAfter: number): Response => {
   res.headers.set('Retry-After', String(retryAfter));
   return res;
 };
+
+/**
+ * Session guard for authed routes; mutations also run the origin check.
+ * Returns an early (already CORS-wrapped) Response or the session user.
+ */
+async function requireUser(
+  request: Request,
+  env: Env,
+  send: (res: Response) => Response,
+  checkOrigin = false,
+): Promise<Response | SessionUser> {
+  if (checkOrigin && !assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
+  const user = await getSessionUser(request, env);
+  if (!user) return send(json({ error: 'unauthorized' }, 401));
+  return user;
+}
+
+/** Session + intervals-key guard; a missing key means reconnect. */
+async function requireIcuKey(
+  request: Request,
+  env: Env,
+  send: (res: Response) => Response,
+): Promise<Response | { user: SessionUser; key: string }> {
+  const user = await requireUser(request, env, send);
+  if (user instanceof Response) return user;
+  const key = await readApiKey(env, user.id);
+  if (!key) return send(json({ error: 'intervals_reconnect' }, 401));
+  return { user, key };
+}
+
+/**
+ * Validates template name/definition fields; partial (PUT) allows either to be
+ * absent. Returns an unsent error Response or the parsed fields.
+ */
+function parseTemplateBody(
+  body: Record<string, unknown> | null,
+  partial: false,
+): Response | { name: string; definition: string };
+function parseTemplateBody(
+  body: Record<string, unknown> | null,
+  partial: true,
+): Response | { name?: string; definition?: string };
+function parseTemplateBody(
+  body: Record<string, unknown> | null,
+  partial: boolean,
+): Response | { name?: string; definition?: string } {
+  const out: { name?: string; definition?: string } = {};
+  if (body?.['name'] !== undefined || !partial) {
+    const raw = typeof body?.['name'] === 'string' ? body['name'].trim().slice(0, 60) : '';
+    if (!raw) return json({ error: 'name required' }, 400);
+    out.name = raw;
+  }
+  if (body?.['definition'] !== undefined || !partial) {
+    try {
+      out.definition = JSON.stringify(parseTemplateJson(JSON.stringify(body?.['definition'])));
+    } catch {
+      return json({ error: 'invalid template' }, 400);
+    }
+  }
+  return out;
+}
 
 const icuFailure = (res: { auth: boolean; status: number; retryAfter: string | null }): Response => {
   if (res.auth) return json({ error: 'intervals_reconnect' }, 401);
@@ -120,11 +197,55 @@ const icuFailure = (res: { auth: boolean; status: number; retryAfter: string | n
   return json({ error: 'intervals' }, 502);
 };
 
+/** Aspect from AI request bodies; anything unrecognized means vertical. */
+const parseAspect = (body: Record<string, unknown> | null): AspectClass => {
+  const aspect = body?.['aspect'];
+  return aspect === 'square' || aspect === 'horizontal' ? aspect : 'vertical';
+};
+
+/** AI credentials from env, or null when the worker is unconfigured. */
+const requireAiCreds = (env: Env): { endpoint: string; key: string } | null =>
+  env.AI_ENDPOINT && env.AI_KEY ? { endpoint: env.AI_ENDPOINT, key: env.AI_KEY } : null;
+
+/** Shared loginless AI-route prelude: origin check, per-route throttle, body, aspect. */
+interface AiRouteContext {
+  body: Record<string, unknown> | null;
+  aspect: AspectClass;
+}
+async function aiPrelude(
+  request: Request,
+  env: Env,
+  send: (res: Response) => Response,
+  bucket: string,
+): Promise<Response | AiRouteContext> {
+  if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
+  const limited = await authThrottled(env, request, bucket);
+  if (limited.throttled) return send(throttleResponse(limited.retryAfter));
+  const body = await readJson(request);
+  return { body, aspect: parseAspect(body) };
+}
+
+/** One model call plus output validation; transport/parse failures become ai_failed. */
+async function runAiGenerate(
+  send: (res: Response) => Response,
+  work: () => Promise<string>,
+): Promise<Response> {
+  try {
+    return send(json({ template: parseAiTemplate(await work()) }));
+  } catch (err) {
+    console.error('[ai]', err);
+    return send(json({ error: 'ai_failed' }, 502));
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const send = (res: Response): Response => withCors(res, request, env);
 
+    // Uncaught throws must still carry CORS headers otherwise the browser
+    // masks the real 500 as a CORS failure.
+    try {
     if (request.method === 'OPTIONS' && url.pathname.startsWith('/api/')) {
       return send(
         new Response(null, {
@@ -141,7 +262,6 @@ export default {
       return send(
         json({
           ok: true,
-          phase: 0,
           schemaVersion: TEMPLATE_SCHEMA_VERSION,
           db: Boolean(env.DB),
         }),
@@ -172,8 +292,8 @@ export default {
 
     // Session probe for the web app (cookie or bearer) and future API consumers.
     if (url.pathname === '/api/me' && request.method === 'GET') {
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send);
+      if (user instanceof Response) return user;
       return send(json({ user }));
     }
 
@@ -199,7 +319,7 @@ export default {
 
     if (url.pathname === '/api/register' && request.method === 'POST') {
       if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const limited = await authThrottled(env, request);
+      const limited = await authThrottled(env, request, 'register');
       if (limited.throttled) return send(throttleResponse(limited.retryAfter));
       const body = await readJson(request);
       const email = normalizeEmail(body?.['email']);
@@ -215,7 +335,7 @@ export default {
         // No 'taken' oracle: the rightful password just logs in, anything else
         // fails exactly like a bad login.
         const stored = typeof existing['password_hash'] === 'string' ? existing['password_hash'] : null;
-        const okUser = stored ? await verifyPassword(password, stored) : false;
+        const okUser = stored ? await verifyPassword(password, stored) : await dummyVerify().then(() => false);
         if (!okUser) return send(json({ error: 'invalid' }, 401));
         return loggedIn({
           id: existing['id'] as string,
@@ -234,7 +354,7 @@ export default {
 
     if (url.pathname === '/api/login' && request.method === 'POST') {
       if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const limited = await authThrottled(env, request);
+      const limited = await authThrottled(env, request, 'login');
       if (limited.throttled) return send(throttleResponse(limited.retryAfter));
       const body = await readJson(request);
       const email = normalizeEmail(body?.['email']);
@@ -266,20 +386,19 @@ export default {
       if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
       await deleteSession(request, env);
       const res = json({ ok: true });
-      res.headers.append('Set-Cookie', expireSessionCookie(env));
+      res.headers.append('Set-Cookie', buildSessionCookie(env, '', 0));
       return send(res);
     }
 
     if (url.pathname === '/api/intervals/status' && request.method === 'GET') {
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send);
+      if (user instanceof Response) return user;
       return send(json({ connected: (await readApiKey(env, user.id)) !== null }));
     }
 
     if (url.pathname === '/api/intervals/key' && request.method === 'PUT') {
-      if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send, true);
+      if (user instanceof Response) return user;
       const body = await readJson(request);
       const apiKey = typeof body?.['apiKey'] === 'string' ? body['apiKey'].trim() : '';
       if (!apiKey || apiKey.length > 128) return send(json({ error: 'intervals_key' }, 400));
@@ -289,18 +408,16 @@ export default {
     }
 
     if (url.pathname === '/api/intervals/key' && request.method === 'DELETE') {
-      if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send, true);
+      if (user instanceof Response) return user;
       await deleteApiKey(env, user.id);
       return send(json({ ok: true }));
     }
 
     if (url.pathname === '/api/intervals/activities' && request.method === 'GET') {
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
-      const key = await readApiKey(env, user.id);
-      if (!key) return send(json({ error: 'intervals_reconnect' }, 401));
+      const ctx = await requireIcuKey(request, env, send);
+      if (ctx instanceof Response) return ctx;
+      const key = ctx.key;
       const page = Math.min(12, Math.max(1, Number(url.searchParams.get('page')) || 1));
       const res = await listIcuActivities(key, page);
       if (!res.ok) return send(icuFailure(res));
@@ -311,18 +428,17 @@ export default {
       url.pathname,
     );
     if (icuStreamsMatch && request.method === 'GET') {
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
-      const key = await readApiKey(env, user.id);
-      if (!key) return send(json({ error: 'intervals_reconnect' }, 401));
+      const ctx = await requireIcuKey(request, env, send);
+      if (ctx instanceof Response) return ctx;
+      const key = ctx.key;
       const res = await getIcuStreams(key, icuStreamsMatch[1]);
       if (!res.ok) return send(icuFailure(res));
       return send(json({ streams: res.data }));
     }
 
     if (url.pathname === '/api/my/templates' && request.method === 'GET') {
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send);
+      if (user instanceof Response) return user;
       const { results } = await env.DB.prepare(
         'SELECT id, name, definition, schema_version, updated_at FROM user_templates WHERE user_id = ? ORDER BY updated_at DESC',
       )
@@ -347,19 +463,13 @@ export default {
     }
 
     if (url.pathname === '/api/my/templates' && request.method === 'POST') {
-      if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send, true);
+      if (user instanceof Response) return user;
       const body = await readJson(request);
-      const name = typeof body?.['name'] === 'string' ? body['name'].trim().slice(0, 60) : '';
-      if (!name) return send(json({ error: 'name required' }, 400));
-      let definition: string;
-      try {
-        const parsed = parseTemplateJson(JSON.stringify(body?.['definition']));
-        definition = JSON.stringify(parsed);
-      } catch {
-        return send(json({ error: 'invalid template' }, 400));
-      }
+      const parsed = parseTemplateBody(body, false);
+      if (parsed instanceof Response) return send(parsed);
+      const name = parsed.name;
+      const definition = parsed.definition;
       const rawId = body?.['id'];
       const id =
         typeof rawId === 'string' && ID_RE.test(rawId) ? rawId : crypto.randomUUID();
@@ -399,9 +509,8 @@ export default {
 
     const itemMatch = /^\/api\/my\/templates\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
     if (itemMatch && (request.method === 'PUT' || request.method === 'DELETE')) {
-      if (!assertOrigin(request, env)) return send(json({ error: 'origin' }, 403));
-      const user = await getSessionUser(request, env);
-      if (!user) return send(json({ error: 'unauthorized' }, 401));
+      const user = await requireUser(request, env, send, true);
+      if (user instanceof Response) return user;
       const id = itemMatch[1];
       const existing = await env.DB.prepare('SELECT user_id FROM user_templates WHERE id = ?')
         .bind(id)
@@ -413,25 +522,18 @@ export default {
         await env.DB.prepare('DELETE FROM user_templates WHERE id = ?').bind(id).run();
         return send(json({ ok: true }));
       }
-      const body = await readJson(request);
+      const parsed = parseTemplateBody(await readJson(request), true);
+      if (parsed instanceof Response) return send(parsed);
       const sets: string[] = [];
       const binds: unknown[] = [];
-      if (body?.['name'] !== undefined) {
-        const name =
-          typeof body['name'] === 'string' ? body['name'].trim().slice(0, 60) : '';
-        if (!name) return send(json({ error: 'name required' }, 400));
+      if (parsed.name !== undefined) {
         sets.push('name = ?');
-        binds.push(name);
+        binds.push(parsed.name);
       }
-      if (body?.['definition'] !== undefined) {
-        try {
-          const parsed = parseTemplateJson(JSON.stringify(body['definition']));
-          sets.push('definition = ?');
-          binds.push(JSON.stringify(parsed));
-          sets.push(`schema_version = ${TEMPLATE_SCHEMA_VERSION}`);
-        } catch {
-          return send(json({ error: 'invalid template' }, 400));
-        }
+      if (parsed.definition !== undefined) {
+        sets.push('definition = ?');
+        binds.push(parsed.definition);
+        sets.push(`schema_version = ${TEMPLATE_SCHEMA_VERSION}`);
       }
       if (sets.length === 0) return send(json({ error: 'nothing to update' }, 400));
       sets.push(`updated_at = ${NOW}`);
@@ -442,6 +544,71 @@ export default {
       return send(json({ ok: true }));
     }
 
+    if (url.pathname === '/api/ai/template' && request.method === 'POST') {
+      const ctx = await aiPrelude(request, env, send, 'ai-template');
+      if (ctx instanceof Response) return ctx;
+      const prompt = typeof ctx.body?.['prompt'] === 'string' ? ctx.body['prompt'].trim().slice(0, 500) : '';
+      if (!prompt) return send(json({ error: 'prompt required' }, 400));
+      const creds = requireAiCreds(env);
+      if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      return runAiGenerate(send, () =>
+        generateTemplateJson({
+          endpoint: creds.endpoint,
+          key: creds.key,
+          model: env.AI_MODEL || AI_DEFAULT_MODEL,
+          system: buildSystemPrompt(ctx.aspect),
+          prompt,
+        }),
+      );
+    }
+
+    if (url.pathname === '/api/ai/auto' && request.method === 'POST') {
+      const ctx = await aiPrelude(request, env, send, 'ai-auto');
+      if (ctx instanceof Response) return ctx;
+      const image = typeof ctx.body?.['image'] === 'string' ? ctx.body['image'] : '';
+      if (!image.startsWith('data:image/') || image.length > 500_000) {
+        return send(json({ error: 'image required' }, 400));
+      }
+      const creds = requireAiCreds(env);
+      if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      return runAiGenerate(send, () =>
+        generateTemplateJson({
+          endpoint: creds.endpoint,
+          key: creds.key,
+          model: env.AI_MODEL || AI_DEFAULT_MODEL,
+          system: buildAutoSystemPrompt(ctx.aspect),
+          prompt: 'Design the best template for this video frame.',
+          image,
+          schema: AUTO_JSON_SCHEMA,
+        }),
+      );
+    }
+
+    if (url.pathname === '/api/ai/adjust' && request.method === 'POST') {
+      const ctx = await aiPrelude(request, env, send, 'ai-adjust');
+      if (ctx instanceof Response) return ctx;
+      const instruction =
+        typeof ctx.body?.['instruction'] === 'string' ? ctx.body['instruction'].trim().slice(0, 500) : '';
+      if (!instruction) return send(json({ error: 'instruction required' }, 400));
+      const creds = requireAiCreds(env);
+      if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      return runAiGenerate(send, async () => {
+        const base = parseTemplateJson(JSON.stringify(ctx.body?.['template']));
+        return generateTemplateJson({
+          endpoint: creds.endpoint,
+          key: creds.key,
+          model: env.AI_MODEL || AI_DEFAULT_MODEL,
+          system: buildAdjustSystemPrompt(ctx.aspect),
+          prompt: `Current template:\n${JSON.stringify(base)}\n\nInstruction:\n${instruction}`,
+          temperature: 0.2,
+        });
+      });
+    }
+
     return send(json({ error: 'not found' }, 404));
+    } catch (err) {
+      console.error('[api]', err);
+      return send(json({ error: 'internal' }, 500));
+    }
   },
 };

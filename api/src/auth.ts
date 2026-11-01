@@ -25,21 +25,15 @@ export const webOrigins = (env: AuthEnv): string[] =>
 export const sessionCookieName = (env: AuthEnv): string =>
   isSecureAuth(env) ? '__Secure-authjs.session-token' : 'authjs.session-token';
 
-/** Session cookie identical to Auth.js's, so its signout/session read ours. */
-export function buildSessionCookie(env: AuthEnv, token: string): string {
+/**
+ * Session cookie identical to Auth.js's, so its signout/session read ours.
+ * maxAge 0 clears it (same attributes so it overwrites the login one).
+ */
+export function buildSessionCookie(env: AuthEnv, token: string, maxAge: number = SESSION_MAX_AGE): string {
   const secure = isSecureAuth(env);
   return (
     `${sessionCookieName(env)}=${token}; Path=/; HttpOnly; ` +
-    `SameSite=${secure ? 'None' : 'Lax'}${secure ? '; Secure' : ''}; Max-Age=${SESSION_MAX_AGE}`
-  );
-}
-
-/** Clears the session cookie (same attributes so it overwrites the login one). */
-export function expireSessionCookie(env: AuthEnv): string {
-  const secure = isSecureAuth(env);
-  return (
-    `${sessionCookieName(env)}=; Path=/; HttpOnly; ` +
-    `SameSite=${secure ? 'None' : 'Lax'}${secure ? '; Secure' : ''}; Max-Age=0`
+    `SameSite=${secure ? 'None' : 'Lax'}${secure ? '; Secure' : ''}; Max-Age=${maxAge}`
   );
 }
 

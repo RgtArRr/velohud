@@ -1,5 +1,5 @@
 import type { MetricId, TimeFormat } from '@velohud/shared';
-import { formatSpan } from './telemetry.js';
+import { formatSpan, splitHMS } from './telemetry.js';
 
 export type Units = 'metric' | 'imperial';
 
@@ -11,10 +11,7 @@ export interface FormattedMetric {
 /** Elapsed seconds rendered under a TimeFormat. */
 export function formatElapsed(totalSec: number, format: TimeFormat = 'auto'): string {
   if (format === 'auto') return formatSpan(totalSec);
-  const s = Math.max(0, Math.floor(totalSec));
-  const h = Math.floor(s / 3600);
-  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const ss = String(s % 60).padStart(2, '0');
+  const { h, mm, ss } = splitHMS(totalSec);
   switch (format) {
     case 'hmm':
       return `${h}:${mm}`;
@@ -29,6 +26,12 @@ export function formatElapsed(totalSec: number, format: TimeFormat = 'auto'): st
   }
 }
 
+/** m:ss per unit, the runner's pace readout (raw is sec/km). */
+const formatPace = (secPerUnit: number): string => {
+  const s = Math.max(0, Math.floor(secPerUnit));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
 /** Display formatting for one metric value (raw SI units in). */
 export function formatMetric(
   metric: MetricId,
@@ -41,6 +44,10 @@ export function formatMetric(
       return units === 'metric'
         ? { value: (raw * 3.6).toFixed(1), unit: 'km/h' }
         : { value: (raw * 2.23694).toFixed(1), unit: 'mph' };
+    case 'pace':
+      return units === 'metric'
+        ? { value: formatPace(raw), unit: '/km' }
+        : { value: formatPace(raw * 1.60934), unit: '/mi' };
     case 'heartRate':
       return { value: String(Math.round(raw)), unit: 'bpm' };
     case 'power':

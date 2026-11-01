@@ -1,4 +1,5 @@
 import {
+  isRangePair,
   resolveLayout,
   type MetricId,
   type PanelShape,
@@ -7,6 +8,7 @@ import {
   type WidgetDef,
 } from '@velohud/shared';
 import {
+  lowerBound,
   nextProfileWindow,
   sampleAt,
   widgetValue,
@@ -25,6 +27,7 @@ import {
 /** Overlay labels are hardcoded English content: templates (incl. AI output) cannot rename them. */
 const LABEL: Record<MetricId, string> = {
   speed: 'SPD',
+  pace: 'PACE',
   heartRate: 'HR',
   power: 'PWR',
   cadence: 'CAD',
@@ -40,6 +43,7 @@ const LABEL: Record<MetricId, string> = {
 /** Fallback gauge scales in raw SI units, used when the widget sets no range. */
 const GAUGE_DEFAULTS: Record<MetricId, [number, number]> = {
   speed: [0, 15],
+  pace: [180, 600],
   heartRate: [40, 200],
   power: [0, 400],
   cadence: [0, 120],
@@ -214,35 +218,13 @@ function drawNumber(
 }
 
 /** Samples ascend in t (sampleAt binary-searches on it): first index with t >= fromT. */
-function windowStart(samples: { t: number }[], fromT: number): number {
-  let lo = 0;
-  let hi = samples.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (samples[mid].t < fromT) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
-}
-
 /** Fraction of [min,max]; a zero-span range draws empty instead of NaN. */
 const fracOf = (raw: number, min: number, max: number): number =>
   max - min < 1e-9 ? 0 : Math.min(1, Math.max(0, (raw - min) / (max - min)));
 
 /** Validated gauge scale: a malformed range falls back instead of throwing. */
 const gaugeRange = (widget: WidgetDef): [number, number] => {
-  const r: unknown = widget.range;
-  if (Array.isArray(r) && r.length === 2) {
-    const [min, max] = r;
-    if (
-      typeof min === 'number' &&
-      Number.isFinite(min) &&
-      typeof max === 'number' &&
-      Number.isFinite(max)
-    ) {
-      return [min, max];
-    }
-  }
+  if (isRangePair(widget.range)) return widget.range;
   return GAUGE_DEFAULTS[widget.metric];
 };
 
@@ -338,7 +320,6 @@ function drawLabelTop(
   ctx.restore();
 }
 
-/** Power zone arc: 7 Coggan segments, active zone lit. */
 /** Classic semicircular speedometer with needle + digital readout. */
 function drawSpeedo(
   ctx: Ctx,
@@ -551,6 +532,31 @@ function drawGears(
   ctx.restore();
 }
 
+/** Shared spark/profile header: left label + right value line. */
+function drawChartHeader(
+  ctx: Ctx,
+  style: ResolvedStyle,
+  text: { label: string; line: string; showLabel: boolean },
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): void {
+  ctx.save();
+  if (text.showLabel) {
+    ctx.fillStyle = style.accent;
+    ctx.font = `600 ${Math.max(8, h * 0.11) * style.labelScale}px ${style.labelFont}`;
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.fillText(text.label, x + w * 0.05, y + h * 0.06, w * 0.4);
+  }
+  ctx.fillStyle = style.text;
+  ctx.font = `700 ${h * 0.16 * style.valueScale}px ${style.valueFont}`;
+  ctx.textAlign = 'right';
+  ctx.fillText(text.line, x + w * 0.95, y + h * 0.05, w * 0.5);
+  ctx.restore();
+}
+
 /** Last-30 s sparkline of any metric. */
 function drawSpark(
   ctx: Ctx,
@@ -570,27 +576,15 @@ function drawSpark(
   const pts: [number, number][] = [];
   if (hist) {
     const samples = hist.activity.samples;
-    for (let i = windowStart(samples, hist.t - 30); i < samples.length; i++) {
+    for (let i = lowerBound(samples, hist.t - 30); i < samples.length; i++) {
       const s = samples[i];
       if (s.t > hist.t) break;
       const v = widget.metric === 'elapsedTime' ? s.t : s[widget.metric as keyof TelemetrySample];
       if (typeof v === 'number') pts.push([s.t, v]);
     }
   }
-  ctx.save();
-  if (widget.showLabel !== false) {
-    ctx.fillStyle = style.accent;
-    ctx.font = `600 ${Math.max(8, h * 0.11) * style.labelScale}px ${style.labelFont}`;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    ctx.fillText(text.label, x + w * 0.05, y + h * 0.06, w * 0.4);
-  }
-  ctx.fillStyle = style.text;
-  ctx.font = `700 ${h * 0.16 * style.valueScale}px ${style.valueFont}`;
-  ctx.textAlign = 'right';
   const line = text.unit ? `${text.value} ${text.unit}` : text.value;
-  ctx.fillText(line, x + w * 0.95, y + h * 0.05, w * 0.5);
-  ctx.restore();
+  drawChartHeader(ctx, style, { label: text.label, line, showLabel: widget.showLabel !== false }, x, y, w, h);
   if (pts.length < 2) {
     drawMissing(ctx, style, x, y + h * 0.2, w, h * 0.8);
     return;
@@ -703,20 +697,8 @@ function drawProfile(
       }
     }
   }
-  ctx.save();
-  if (widget.showLabel !== false) {
-    ctx.fillStyle = style.accent;
-    ctx.font = `600 ${Math.max(8, h * 0.11) * style.labelScale}px ${style.labelFont}`;
-    ctx.textBaseline = 'top';
-    ctx.textAlign = 'left';
-    ctx.fillText(text.label, x + w * 0.05, y + h * 0.06, w * 0.4);
-  }
-  ctx.fillStyle = style.text;
-  ctx.font = `700 ${h * 0.16 * style.valueScale}px ${style.valueFont}`;
-  ctx.textAlign = 'right';
   const line = text.unit ? `${text.value} ${text.unit}` : text.value;
-  ctx.fillText(line, x + w * 0.95, y + h * 0.05, w * 0.5);
-  ctx.restore();
+  drawChartHeader(ctx, style, { label: text.label, line, showLabel: widget.showLabel !== false }, x, y, w, h);
   if (series.length < 2 || !hist) {
     drawMissing(ctx, style, x, y + h * 0.2, w, h * 0.8);
     return;
@@ -812,6 +794,22 @@ function drawVam(
   ctx.restore();
 }
 
+/** Stride-sampled GPS points plus the ride-final fix, shared by drawMap/drawNavMap. */
+function collectGpsPts(samples: TelemetrySample[]): [number, number, number][] {
+  const pts: [number, number, number][] = [];
+  const stride = Math.max(1, Math.floor(samples.length / 1000));
+  for (let i = 0; i < samples.length; i += stride) {
+    const s = samples[i];
+    if (typeof s.lat === 'number' && typeof s.lon === 'number') pts.push([s.lon, s.lat, s.t]);
+  }
+  const last = samples[samples.length - 1];
+  if (last && typeof last.lat === 'number' && typeof last.lon === 'number') {
+    const tail = pts[pts.length - 1];
+    if (!tail || tail[2] !== last.t) pts.push([last.lon, last.lat, last.t]);
+  }
+  return pts;
+}
+
 /** GPS track: faint full route, accent ridden trail, you-are-here dot. */
 function drawMap(
   ctx: Ctx,
@@ -828,20 +826,7 @@ function drawMap(
   void units;
   const style = resolveStyle(template, widget);
   paintPanel(ctx, x, y, w, h, style.shape, style.background, style.backgroundOpacity);
-  const pts: [number, number, number][] = [];
-  if (hist) {
-    const samples = hist.activity.samples;
-    const stride = Math.max(1, Math.floor(samples.length / 1000));
-    for (let i = 0; i < samples.length; i += stride) {
-      const s = samples[i];
-      if (typeof s.lat === 'number' && typeof s.lon === 'number') pts.push([s.lon, s.lat, s.t]);
-    }
-    const last = samples[samples.length - 1];
-    if (last && typeof last.lat === 'number' && typeof last.lon === 'number') {
-      const tail = pts[pts.length - 1];
-      if (!tail || tail[2] !== last.t) pts.push([last.lon, last.lat, last.t]);
-    }
-  }
+  const pts: [number, number, number][] = hist ? collectGpsPts(hist.activity.samples) : [];
   if (pts.length < 2 || !hist) {
     drawLabelTop(ctx, style, 'MAP', x, y, w, h);
     drawMissing(ctx, style, x, y + h * 0.15, w, h * 0.85);
@@ -925,20 +910,7 @@ function drawNavMap(
   void units;
   const style = resolveStyle(template, widget);
   paintPanel(ctx, x, y, w, h, style.shape, style.background, style.backgroundOpacity);
-  const pts: [number, number, number][] = [];
-  if (hist) {
-    const samples = hist.activity.samples;
-    const stride = Math.max(1, Math.floor(samples.length / 1000));
-    for (let i = 0; i < samples.length; i += stride) {
-      const s = samples[i];
-      if (typeof s.lat === 'number' && typeof s.lon === 'number') pts.push([s.lon, s.lat, s.t]);
-    }
-    const last = samples[samples.length - 1];
-    if (last && typeof last.lat === 'number' && typeof last.lon === 'number') {
-      const tail = pts[pts.length - 1];
-      if (!tail || tail[2] !== last.t) pts.push([last.lon, last.lat, last.t]);
-    }
-  }
+  const pts: [number, number, number][] = hist ? collectGpsPts(hist.activity.samples) : [];
   const missing = (): void => {
     drawLabelTop(ctx, style, 'NAV', x, y, w, h);
     drawMissing(ctx, style, x, y + h * 0.15, w, h * 0.85);
@@ -948,18 +920,7 @@ function drawNavMap(
     return;
   }
   // Course: GPS motion first, route direction as fallback.
-  let course: number | undefined;
-  const a = sampleAt(hist.activity, hist.t - 3);
-  const b = sampleAt(hist.activity, hist.t);
-  if (
-    typeof a.lat === 'number' &&
-    typeof a.lon === 'number' &&
-    typeof b.lat === 'number' &&
-    typeof b.lon === 'number' &&
-    (a.lat !== b.lat || a.lon !== b.lon)
-  ) {
-    course = bearingDeg(a.lat, a.lon, b.lat, b.lon);
-  }
+  let course: number | undefined = courseFromMotion(hist.activity, hist.t);
   let i0 = 0;
   while (i0 + 1 < pts.length && pts[i0 + 1][2] <= hist.t) i0 += 1;
   if (course === undefined) {
@@ -1054,6 +1015,22 @@ const bearingDeg = (lat1: number, lon1: number, lat2: number, lon2: number): num
   return (Math.atan2(y, x) / toRad + 360) % 360;
 };
 
+/** Course from GPS motion over the last 3 s, shared by drawNavMap/drawCompass. */
+function courseFromMotion(activity: Activity, t: number): number | undefined {
+  const a = sampleAt(activity, t - 3);
+  const b = sampleAt(activity, t);
+  if (
+    typeof a.lat === 'number' &&
+    typeof a.lon === 'number' &&
+    typeof b.lat === 'number' &&
+    typeof b.lon === 'number' &&
+    (a.lat !== b.lat || a.lon !== b.lon)
+  ) {
+    return bearingDeg(a.lat, a.lon, b.lat, b.lon);
+  }
+  return undefined;
+}
+
 /** Heading compass from GPS motion, dial rotated so course points up. */
 function drawCompass(
   ctx: Ctx,
@@ -1073,17 +1050,7 @@ function drawCompass(
   paintPanel(ctx, x, y, w, h, style.shape, style.background, style.backgroundOpacity);
   let course: number | undefined;
   if (hist && hist.t > 3) {
-    const a = sampleAt(hist.activity, hist.t - 3);
-    const b = sampleAt(hist.activity, hist.t);
-    if (
-      typeof a.lat === 'number' &&
-      typeof a.lon === 'number' &&
-      typeof b.lat === 'number' &&
-      typeof b.lon === 'number' &&
-      (a.lat !== b.lat || a.lon !== b.lon)
-    ) {
-      course = bearingDeg(a.lat, a.lon, b.lat, b.lon);
-    }
+    course = courseFromMotion(hist.activity, hist.t);
   }
   if (course === undefined) {
     drawLabelTop(ctx, style, 'HDG', x, y, w, h);

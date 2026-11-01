@@ -6,6 +6,7 @@ import type {
   WidgetLayout,
 } from '@velohud/shared';
 import { t } from './i18n.js';
+import { METERS_PER_DEG_LAT, METERS_PER_DEG_LON } from './geo.js';
 
 /** Pure, DOM-free widget catalog + factory for the right panel. No side effects. */
 
@@ -26,6 +27,7 @@ export const WIDGET_KINDS: WidgetKind[] = [
   'compass',
 ];
 
+// Inspector-only list: deliberately omits 'pace' (valid in templates, never offered here).
 export const METRIC_IDS: MetricId[] = [
   'speed',
   'heartRate',
@@ -92,21 +94,25 @@ export interface KindCaps {
   gearsMode: boolean;
 }
 
+const DEFAULT_CAPS: KindCaps = {
+  unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false,
+};
+
 const KIND_CAPS: Record<WidgetKind, KindCaps> = {
-  stat: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  number: { unit: true, labelToggle: false, trailWidth: false, text: true, gearsMode: false },
-  gauge: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  speedo: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  ring: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  slope: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  gears: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: true },
-  spark: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  profile: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  profilenext: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  vam: { unit: true, labelToggle: true, trailWidth: false, text: true, gearsMode: false },
-  map: { unit: false, labelToggle: false, trailWidth: true, text: false, gearsMode: false },
-  navmap: { unit: false, labelToggle: false, trailWidth: true, text: false, gearsMode: false },
-  compass: { unit: false, labelToggle: false, trailWidth: false, text: true, gearsMode: false },
+  stat: { ...DEFAULT_CAPS },
+  number: { ...DEFAULT_CAPS, labelToggle: false },
+  gauge: { ...DEFAULT_CAPS },
+  speedo: { ...DEFAULT_CAPS },
+  ring: { ...DEFAULT_CAPS },
+  slope: { ...DEFAULT_CAPS },
+  gears: { ...DEFAULT_CAPS, gearsMode: true },
+  spark: { ...DEFAULT_CAPS },
+  profile: { ...DEFAULT_CAPS },
+  profilenext: { ...DEFAULT_CAPS },
+  vam: { ...DEFAULT_CAPS },
+  map: { ...DEFAULT_CAPS, unit: false, labelToggle: false, trailWidth: true, text: false },
+  navmap: { ...DEFAULT_CAPS, unit: false, labelToggle: false, trailWidth: true, text: false },
+  compass: { ...DEFAULT_CAPS, unit: false, labelToggle: false },
 };
 
 export const capsFor = (kind: WidgetKind): KindCaps => KIND_CAPS[kind];
@@ -176,12 +182,22 @@ export interface NavPoint {
   t: number;
 }
 
-const M_PER_DEG_LAT = 110540;
-const M_PER_DEG_LON = 111320;
-
 function segMeters(aLon: number, aLat: number, bLon: number, bLat: number): number {
   const kx = Math.cos((((aLat + bLat) / 2) * Math.PI) / 180);
-  return Math.hypot((bLon - aLon) * kx * M_PER_DEG_LON, (bLat - aLat) * M_PER_DEG_LAT);
+  return Math.hypot((bLon - aLon) * kx * METERS_PER_DEG_LON, (bLat - aLat) * METERS_PER_DEG_LAT);
+}
+
+/** Walk from `i0` toward `dir` until `budgetM` accumulates or points run out. */
+function walk(points: NavPoint[], i0: number, dir: -1 | 1, budgetM: number): number {
+  let i = i0;
+  let acc = 0;
+  while ((dir < 0 ? i > 0 : i + 1 < points.length) && acc < budgetM) {
+    const a = points[i];
+    const b = points[i + dir];
+    acc += segMeters(a.lon, a.lat, b.lon, b.lat);
+    i += dir;
+  }
+  return i;
 }
 
 /**
@@ -196,18 +212,8 @@ export function navWindow(
 ): { start: number; end: number } {
   let i0 = 0;
   while (i0 + 1 < points.length && points[i0 + 1].t <= t) i0 += 1;
-  let start = i0;
-  let acc = 0;
-  while (start > 0 && acc < behindM) {
-    acc += segMeters(points[start].lon, points[start].lat, points[start - 1].lon, points[start - 1].lat);
-    start -= 1;
-  }
-  let end = i0;
-  acc = 0;
-  while (end + 1 < points.length && acc < aheadM) {
-    acc += segMeters(points[end].lon, points[end].lat, points[end + 1].lon, points[end + 1].lat);
-    end += 1;
-  }
+  const start = walk(points, i0, -1, behindM);
+  const end = walk(points, i0, 1, aheadM);
   return { start, end };
 }
 
@@ -219,8 +225,8 @@ export function navProject(
   courseDeg: number,
 ): { fwd: number; right: number } {
   const kx = Math.cos((origin.lat * Math.PI) / 180);
-  const dx = (lon - origin.lon) * kx * M_PER_DEG_LON;
-  const dy = (lat - origin.lat) * M_PER_DEG_LAT;
+  const dx = (lon - origin.lon) * kx * METERS_PER_DEG_LON;
+  const dy = (lat - origin.lat) * METERS_PER_DEG_LAT;
   const c = (courseDeg * Math.PI) / 180;
   return { fwd: dx * Math.sin(c) + dy * Math.cos(c), right: dx * Math.cos(c) - dy * Math.sin(c) };
 }
