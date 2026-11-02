@@ -800,7 +800,7 @@ function drawVam(
 }
 
 /** Stride-sampled GPS points plus the ride-final fix, shared by drawMap/drawNavMap. */
-function collectGpsPts(samples: TelemetrySample[]): [number, number, number][] {
+export function collectGpsPts(samples: TelemetrySample[]): [number, number, number][] {
   const pts: [number, number, number][] = [];
   const stride = Math.max(1, Math.floor(samples.length / 1000));
   for (let i = 0; i < samples.length; i += stride) {
@@ -813,6 +813,68 @@ function collectGpsPts(samples: TelemetrySample[]): [number, number, number][] {
     if (!tail || tail[2] !== last.t) pts.push([last.lon, last.lat, last.t]);
   }
   return pts;
+}
+
+export interface GpsProjection {
+  /** Stride-sampled fixes [lon, lat, t]. */
+  pts: [number, number, number][];
+  x: (lon: number) => number;
+  y: (lat: number) => number;
+}
+
+/**
+ * Equirectangular fit of the GPS track into a box (origin boxX/boxY, padFrac
+ * padding each side). Shared by the map widget and the sync minimap so paint
+ * and click hit-testing project identically. Null when fewer than 2 fixes.
+ */
+export function projectGpsTrack(
+  samples: TelemetrySample[],
+  boxX: number,
+  boxY: number,
+  boxW: number,
+  boxH: number,
+  padFrac = 0.1,
+): GpsProjection | null {
+  const pts = collectGpsPts(samples);
+  if (pts.length < 2) return null;
+  let minLon = Infinity;
+  let maxLon = -Infinity;
+  let minLat = Infinity;
+  let maxLat = -Infinity;
+  for (const [lon, lat] of pts) {
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+  }
+  const kx = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
+  const spanLon = Math.max(1e-9, (maxLon - minLon) * kx);
+  const spanLat = Math.max(1e-9, maxLat - minLat);
+  const pad = Math.min(boxW, boxH) * padFrac;
+  const scale = Math.min((boxW - pad * 2) / spanLon, (boxH - pad * 2) / spanLat);
+  const midLon = (minLon + maxLon) / 2;
+  const midLat = (minLat + maxLat) / 2;
+  return {
+    pts,
+    x: (lon: number) => boxX + boxW / 2 + (lon - midLon) * kx * scale,
+    y: (lat: number) => boxY + boxH / 2 - (lat - midLat) * scale,
+  };
+}
+
+/** Activity time of the fix nearest to a projected pixel. */
+export function nearestGpsT(proj: GpsProjection, px: number, py: number): number {
+  let best = proj.pts[0][2];
+  let bestD = Infinity;
+  for (const [lon, lat, t] of proj.pts) {
+    const dx = proj.x(lon) - px;
+    const dy = proj.y(lat) - py;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) {
+      bestD = d;
+      best = t;
+    }
+  }
+  return best;
 }
 
 /** GPS track: faint full route, accent ridden trail, you-are-here dot. */
@@ -831,32 +893,13 @@ function drawMap(
   void units;
   const style = resolveStyle(template, widget);
   paintPanel(ctx, x, y, w, h, style.shape, style.background, style.backgroundOpacity);
-  const pts: [number, number, number][] = hist ? collectGpsPts(hist.activity.samples) : [];
-  if (pts.length < 2 || !hist) {
+  const proj = hist ? projectGpsTrack(hist.activity.samples, x, y, w, h) : null;
+  if (!proj || !hist) {
     drawLabelTop(ctx, style, 'MAP', x, y, w, h);
     drawMissing(ctx, style, x, y + h * 0.15, w, h * 0.85);
     return;
   }
-  let minLon = Infinity;
-  let maxLon = -Infinity;
-  let minLat = Infinity;
-  let maxLat = -Infinity;
-  for (const [lon, lat] of pts) {
-    if (lon < minLon) minLon = lon;
-    if (lon > maxLon) maxLon = lon;
-    if (lat < minLat) minLat = lat;
-    if (lat > maxLat) maxLat = lat;
-  }
-  // Equirectangular fit: shrink longitude by cos(latitude).
-  const kx = Math.cos((((minLat + maxLat) / 2) * Math.PI) / 180);
-  const spanLon = Math.max(1e-9, (maxLon - minLon) * kx);
-  const spanLat = Math.max(1e-9, maxLat - minLat);
-  const pad = Math.min(w, h) * 0.1;
-  const scale = Math.min((w - pad * 2) / spanLon, (h - pad * 2) / spanLat);
-  const X = (lon: number): number =>
-    x + w / 2 + ((lon - (minLon + maxLon) / 2) * kx * scale);
-  const Y = (lat: number): number =>
-    y + h / 2 - ((lat - (minLat + maxLat) / 2) * scale);
+  const { pts, x: X, y: Y } = proj;
   const { track: trackW, ridden: riddenW } = mapStrokeWidths(widget.strokeWidth, w, h);
   ctx.save();
   ctx.lineJoin = 'round';

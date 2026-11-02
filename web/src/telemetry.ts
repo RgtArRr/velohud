@@ -639,6 +639,73 @@ export function activityAvailability(activity: Activity): DataAvailability {
   return { metrics, hasGps };
 }
 
+const NICE_TIME_STEPS = [15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+const NICE_KM_STEPS = [1, 2, 5, 10, 25, 50, 100];
+
+/**
+ * Fraction of stride-sampled points carrying a numeric field (sync-graph
+ * eligibility: a metric graphs only when most of the ride carries it).
+ */
+export function seriesCoverage(
+  samples: readonly TelemetrySample[],
+  key: keyof TelemetrySample,
+): number {
+  if (samples.length === 0) return 0;
+  const stride = Math.max(1, Math.floor(samples.length / 200));
+  let present = 0;
+  let total = 0;
+  for (let i = 0; i < samples.length; i += stride) {
+    total += 1;
+    if (typeof samples[i][key] === 'number') present += 1;
+  }
+  return total > 0 ? present / total : 0;
+}
+
+/**
+ * Time-axis ticks for the sync graph: uniform nice step from 0 plus the exact
+ * end (unless it lands on a step). At most maxTicks + 1 labels.
+ */
+export function timeAxisTicks(dur: number, maxTicks = 7): number[] {
+  if (!(dur > 0)) return [0];
+  const step = NICE_TIME_STEPS.find((s) => dur / s <= maxTicks) ?? 7200;
+  const ticks: number[] = [];
+  for (let t = 0; t < dur; t += step) ticks.push(t);
+  if (ticks.length === 0 || ticks[ticks.length - 1] < dur - 1) ticks.push(dur);
+  return ticks;
+}
+
+/**
+ * Distance-axis ticks: activity time of each crossed km mark (single pass).
+ * Empty without a distance series or under 500 m. km counts from the first fix.
+ */
+export function distanceAxisTicks(
+  samples: readonly { t: number; distance?: number }[],
+  maxTicks = 7,
+): { t: number; km: number }[] {
+  let first: number | undefined;
+  let last: number | undefined;
+  for (const s of samples) {
+    if (typeof s.distance !== 'number') continue;
+    if (first === undefined) first = s.distance;
+    last = s.distance;
+  }
+  if (first === undefined || last === undefined || last - first < 500) return [];
+  const totalKm = (last - first) / 1000;
+  const step = NICE_KM_STEPS.find((s) => totalKm / s <= maxTicks) ?? 100;
+  const ticks: { t: number; km: number }[] = [];
+  let k = 1;
+  let target = first + step * 1000;
+  for (const s of samples) {
+    if (typeof s.distance !== 'number') continue;
+    while (s.distance >= target && target <= last) {
+      ticks.push({ t: s.t, km: k * step });
+      k += 1;
+      target = first + k * step * 1000;
+    }
+  }
+  return ticks;
+}
+
 /** Forward-looking profile: 5 min ahead of the dot. */
 export const PROFILE_NEXT_AHEAD_SEC = 300;
 /** Dot sits ~0.5 km ahead of the rendered start (distance mode). */

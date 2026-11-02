@@ -680,15 +680,33 @@ a {
   background: #ffffff;
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
-  cursor: ew-resize;
+  cursor: pointer;
   touch-action: none;
   margin-bottom: 8px;
+}
+
+/* Sync minimap: click-to-position, same card treatment as the graph. */
+.activity-map {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #ffffff;
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-card);
+  cursor: pointer;
+  touch-action: manipulation;
+  margin: 4px 0 12px;
+}
+
+.activity-map[hidden] {
+  display: none;
 }
 
 .offset-btns {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  align-items: center;
 }
 
 .editor-row {
@@ -960,6 +978,15 @@ a {
 .seg-opt.active {
   background: var(--ink);
   color: #fff;
+}
+
+.seg-opt:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.seg-opt:disabled:hover {
+  color: var(--muted);
 }
 
 /* Full-width variant: options share one line inside narrow panels. */

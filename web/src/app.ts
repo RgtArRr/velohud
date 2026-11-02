@@ -20,6 +20,9 @@ import {
   activityAvailability,
   activityFromIntervalsStreams,
   activityStartFromOffset,
+  distanceAxisTicks,
+  seriesCoverage,
+  timeAxisTicks,
   formatFixedZone,
   parseActivityXml,
   zoneOffsetHours,
@@ -40,7 +43,7 @@ import {
   resolveVideoInstant,
   type VideoZone,
 } from './video-meta.js';
-import { drawOverlay } from './overlay.js';
+import { drawOverlay, nearestGpsT, projectGpsTrack } from './overlay.js';
 import { renderImage, renderVideo } from './render.js';
 import { BUILTIN_TEMPLATES } from './templates.js';
 import {
@@ -899,6 +902,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
         activityPill.hidden = true;
         renderActivityStats();
         syncActivityTzRow();
+        syncOverviewMetric();
         showToast(err instanceof Error ? err.message : t('intervals.error'));
       }
     } finally {
@@ -1058,7 +1062,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   playIcon.setAttribute('aria-hidden', 'true');
   playBtn.appendChild(playIcon);
   const videoClock = el('span', undefined, t('stage.video', { vt: '00:00', dur: '00:00' }));
-  const teleClock = el('span', undefined, t('stage.teleNone'));
+  const teleClock = el('span', undefined, '');
   const offsetClock = el('strong', undefined, formatOffset(0));
   clocks.append(playBtn, videoClock, teleClock, offsetClock);
   const touchCapable = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
@@ -2617,12 +2621,36 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     selected = null;
   });
 
+  type OverviewMetric = 'power' | 'speed' | 'cadence' | 'elevation';
+  const OVERVIEW_METRICS: OverviewMetric[] = ['power', 'speed', 'cadence', 'elevation'];
+  const OVERVIEW_LABELS: Record<OverviewMetric, string> = {
+    power: t('act.power'),
+    speed: t('act.speed'),
+    cadence: t('act.cadence'),
+    elevation: t('act.elevation'),
+  };
   // Activity timeline: lives in the center column under sync, not full-width.
   const timelineBox = el('section', 'timeline-box');
   timelineBox.append(el('h2', undefined, t('act.title')));
+  const ovMetricRow = el('div', 'editor-row');
+  ovMetricRow.append(el('span', 'muted', t('act.metric')));
+  const ovMetricSeg = el('div', 'seg-switch');
+  ovMetricSeg.setAttribute('role', 'group');
+  ovMetricSeg.setAttribute('aria-label', t('act.metric'));
+  const ovMetricBtns = new Map<OverviewMetric, HTMLButtonElement>();
+  for (const m of OVERVIEW_METRICS) {
+    const b = el('button', 'seg-opt', OVERVIEW_LABELS[m]);
+    b.type = 'button';
+    b.dataset.metric = m;
+    b.disabled = true;
+    ovMetricSeg.appendChild(b);
+    ovMetricBtns.set(m, b);
+  }
+  ovMetricRow.appendChild(ovMetricSeg);
+  timelineBox.append(ovMetricRow);
   const activityCanvas = el('canvas', 'activity-overview');
   activityCanvas.width = 1400;
-  activityCanvas.height = 110;
+  activityCanvas.height = 180;
   activityCanvas.setAttribute('role', 'img');
   activityCanvas.setAttribute('aria-label', t('act.aria'));
   const activityCtx = activityCanvas.getContext('2d');
@@ -2662,6 +2690,17 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (e.key === 'Enter') gotoApply();
   });
   timelineBox.append(gotoRow);
+  // Sync minimap: same clip windows as the graph, geographic view. Clicking a
+  // recognizable point positions the clip when the video has no timestamp.
+  const mapCanvas = el('canvas', 'activity-map');
+  mapCanvas.width = 1400;
+  mapCanvas.height = 260;
+  mapCanvas.hidden = true;
+  mapCanvas.setAttribute('role', 'img');
+  mapCanvas.setAttribute('aria-label', t('act.mapAria'));
+  const mapCtx = mapCanvas.getContext('2d');
+  if (!mapCtx) throw new Error(t('act.errCanvas'));
+  timelineBox.append(mapCanvas);
   center.appendChild(timelineBox);
 
   const footer = el('p', 'muted');
@@ -3037,20 +3076,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     activityTzEditing = false;
     activityPill.textContent = name;
     activityPill.hidden = false;
-    overviewCache = null;
-    const metric = pickOverviewMetric(activity);
-    if (metric) {
-      let min = Infinity;
-      let max = -Infinity;
-      for (const s of activity.samples) {
-        const v = s[metric];
-        if (typeof v === 'number') {
-          if (v < min) min = v;
-          if (v > max) max = v;
-        }
-      }
-      if (max > min) overviewCache = { metric, min, max };
-    }
+    syncOverviewMetric();
     const s = summarize(activity);
     const distUnit = formatMetric('distance', s.distanceM, units);
     const speedUnit = s.avgSpeed !== null ? formatMetric('speed', s.avgSpeed, units) : null;
@@ -3096,6 +3122,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       activityPill.hidden = true;
       renderActivityStats();
       syncActivityTzRow();
+      syncOverviewMetric();
       showToast(err instanceof Error ? err.message : t('st.activityUnreadable'));
     }
   };
@@ -3181,7 +3208,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     applyAutoOffset(clip);
   });
   offsetBtns.appendChild(autoBtn);
-  for (const delta of [-0.5, -0.1, 0.1, 0.5]) {
+  const autoSep = el('span', 'header-sep');
+  autoSep.setAttribute('role', 'separator');
+  autoSep.setAttribute('aria-hidden', 'true');
+  offsetBtns.appendChild(autoSep);
+  for (const delta of [-5, -1, -0.5, -0.1, 0.1, 0.5, 1, 5]) {
     const btn = el('button', 'btn', `${delta > 0 ? '+' : ''}${delta.toFixed(1)} s`);
     btn.type = 'button';
     btn.addEventListener('click', () => {
@@ -3193,29 +3224,55 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     offsetBtns.appendChild(btn);
   }
   // Activity overview: coarse clip positioning for long activities.
-  type OverviewMetric = 'power' | 'speed' | 'heartRate';
-  const OVERVIEW_LABELS: Record<OverviewMetric, string> = {
-    power: t('act.power'),
-    speed: t('act.speed'),
-    heartRate: t('act.hr'),
-  };
   const OVERVIEW_PAD = 10;
+  // Plot geometry: top margin + plot + two axis rows (time, km) below.
+  const OVERVIEW_TOP = 8;
+  const AXIS_ROW_H = 30;
+  const AXIS_H = AXIS_ROW_H * 2 + 4;
+  const AXIS_FONT = '400 20px Inter, system-ui, sans-serif';
   let overviewCache: { metric: OverviewMetric; min: number; max: number } | null = null;
+  let axisCache: {
+    key: string;
+    time: number[];
+    km: { t: number; km: number }[];
+  } | null = null;
 
-  const pickOverviewMetric = (act: Activity): OverviewMetric | null => {
-    const keys: OverviewMetric[] = ['power', 'speed', 'heartRate'];
-    const stride = Math.max(1, Math.floor(act.samples.length / 200));
-    for (const key of keys) {
-      let present = 0;
-      let total = 0;
-      for (let i = 0; i < act.samples.length; i += stride) {
-        total += 1;
-        if (typeof act.samples[i][key] === 'number') present += 1;
+  const pickOverviewMetric = (act: Activity): OverviewMetric | null =>
+    OVERVIEW_METRICS.find((key) => seriesCoverage(act.samples, key) > 0.5) ?? null;
+
+  /** User override; null = automatic (first available). Survives activity swaps. */
+  let userOverviewMetric: OverviewMetric | null = null;
+
+  /** Recomputes the plotted metric (user choice when viable, else auto) + seg state. */
+  const syncOverviewMetric = (): void => {
+    let m = userOverviewMetric;
+    if (m && (!activity || seriesCoverage(activity.samples, m) <= 0.5)) m = null;
+    if (!m && activity) m = pickOverviewMetric(activity);
+    overviewCache = null;
+    if (activity && m) {
+      let min = Infinity;
+      let max = -Infinity;
+      for (const s of activity.samples) {
+        const v = s[m];
+        if (typeof v === 'number') {
+          if (v < min) min = v;
+          if (v > max) max = v;
+        }
       }
-      if (total > 0 && present / total > 0.5) return key;
+      if (max > min) overviewCache = { metric: m, min, max };
     }
-    return null;
+    for (const [key, btn] of ovMetricBtns) {
+      btn.disabled = !activity || seriesCoverage(activity.samples, key) <= 0.5;
+    }
+    syncSeg(ovMetricBtns.values(), (btn) => btn.dataset.metric === overviewCache?.metric);
   };
+
+  for (const [m, btn] of ovMetricBtns) {
+    btn.addEventListener('click', () => {
+      userOverviewMetric = m;
+      syncOverviewMetric();
+    });
+  }
 
   let lastOverviewSig = '';
   const paintOverview = (tt: number): void => {
@@ -3224,6 +3281,8 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     lastOverviewSig = sig;
     const W = activityCanvas.width;
     const H = activityCanvas.height;
+    const plotH = H - OVERVIEW_TOP - AXIS_H;
+    const plotBase = OVERVIEW_TOP + plotH;
     activityCtx.fillStyle = '#ffffff';
     activityCtx.fillRect(0, 0, W, H);
     if (!activity || !overviewCache || activity.durationSec <= 0) {
@@ -3234,7 +3293,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       activityCtx.fillText(
         activity ? t('act.noData') : t('act.emptyCanvas'),
         W / 2,
-        H / 2,
+        OVERVIEW_TOP + plotH / 2,
       );
       activityLabel.textContent = activity ? '' : t('act.empty');
       return;
@@ -3244,16 +3303,16 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const X = (t: number): number =>
       OVERVIEW_PAD + (Math.min(Math.max(t, 0), dur) / dur) * (W - OVERVIEW_PAD * 2);
     const Y = (v: number): number =>
-      H - OVERVIEW_PAD - ((v - min) / (max - min)) * (H - OVERVIEW_PAD * 2);
+      plotBase - ((v - min) / (max - min)) * plotH;
     activityCtx.beginPath();
-    activityCtx.moveTo(X(0), H - OVERVIEW_PAD);
+    activityCtx.moveTo(X(0), plotBase);
     const stride = Math.max(1, Math.floor(activity.samples.length / 400));
     for (let i = 0; i < activity.samples.length; i += stride) {
       const s = activity.samples[i];
       const v = s[metric];
       activityCtx.lineTo(X(s.t), Y(typeof v === 'number' ? v : min));
     }
-    activityCtx.lineTo(X(dur), H - OVERVIEW_PAD);
+    activityCtx.lineTo(X(dur), plotBase);
     activityCtx.closePath();
     activityCtx.fillStyle = 'rgba(36, 36, 36, 0.14)';
     activityCtx.fill();
@@ -3261,17 +3320,49 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       const [winStart, winEnd] = clipWindow(clip);
       const selected = clip.id === selectedClipId;
       activityCtx.fillStyle = selected ? 'rgba(0, 153, 255, 0.16)' : 'rgba(36, 36, 36, 0.10)';
-      activityCtx.fillRect(X(winStart), 2, Math.max(2, X(winEnd) - X(winStart)), H - 4);
+      activityCtx.fillRect(X(winStart), OVERVIEW_TOP, Math.max(2, X(winEnd) - X(winStart)), plotH);
       activityCtx.strokeStyle = selected ? '#101010' : '#898989';
       activityCtx.lineWidth = 1;
-      activityCtx.strokeRect(X(winStart) + 0.5, 2.5, Math.max(2, X(winEnd) - X(winStart)), H - 5);
+      activityCtx.strokeRect(
+        X(winStart) + 0.5,
+        OVERVIEW_TOP + 0.5,
+        Math.max(2, X(winEnd) - X(winStart)),
+        plotH - 1,
+      );
     }
     activityCtx.strokeStyle = '#0099ff';
     activityCtx.lineWidth = 2;
     activityCtx.beginPath();
-    activityCtx.moveTo(X(tt), 0);
-    activityCtx.lineTo(X(tt), H);
+    activityCtx.moveTo(X(tt), OVERVIEW_TOP);
+    activityCtx.lineTo(X(tt), plotBase);
     activityCtx.stroke();
+    // X axes: time row, then km row (km positioned by crossed distance).
+    const axisKey = `${activity.startTime.getTime()}|${dur}|${activity.samples.length}`;
+    if (!axisCache || axisCache.key !== axisKey) {
+      axisCache = {
+        key: axisKey,
+        time: timeAxisTicks(dur),
+        km: distanceAxisTicks(activity.samples),
+      };
+    }
+    const clampX = (x: number): number => Math.min(Math.max(x, 44), W - 44);
+    activityCtx.font = AXIS_FONT;
+    activityCtx.textAlign = 'center';
+    activityCtx.textBaseline = 'top';
+    activityCtx.fillStyle = '#898989';
+    const yTime = plotBase + 4;
+    for (const t of axisCache.time) {
+      const x = clampX(X(t));
+      activityCtx.fillRect(x - 0.5, yTime, 1, 5);
+      activityCtx.fillText(formatSpan(t), x, yTime + 7);
+    }
+    const yKm = yTime + AXIS_ROW_H;
+    const kmTicks = axisCache.km;
+    kmTicks.forEach(({ t, km }, i) => {
+      const x = clampX(X(t));
+      activityCtx.fillRect(x - 0.5, yKm, 1, 5);
+      activityCtx.fillText(i === kmTicks.length - 1 ? `${km} km` : `${km}`, x, yKm + 7);
+    });
     const clip = activeClip();
     activityLabel.textContent = clip
       ? t('act.labelClip', {
@@ -3283,6 +3374,19 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       : t('act.labelN', { metric: OVERVIEW_LABELS[metric], n: clips.length });
   };
 
+  /** Moves the active clip window so activity time t lands anchorSec inside it. */
+  const seekClipToT = (t: number, anchorSec: number): void => {
+    const clip = activeClip();
+    if (!clip || !activity || activity.durationSec <= 0) return;
+    const videoDur = clip.duration > 0 ? clip.duration : 0;
+    const maxStart = Math.max(0, activity.durationSec - videoDur);
+    clip.offsetSec = Math.min(
+      OFFSET_LIMIT,
+      Math.max(-OFFSET_LIMIT, Math.min(Math.max(t - anchorSec, 0), maxStart)),
+    );
+    clip.offsetDirty = true;
+  };
+
   const overviewSeek = (clientX: number, center: boolean): void => {
     const clip = activeClip();
     if (!clip || !activity || activity.durationSec <= 0) return;
@@ -3291,13 +3395,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const t =
       ((px - OVERVIEW_PAD) / (activityCanvas.width - OVERVIEW_PAD * 2)) * activity.durationSec;
     const videoDur = clip.duration > 0 ? clip.duration : 0;
-    const maxStart = Math.max(0, activity.durationSec - videoDur);
-    const target = center ? t - videoDur / 2 : t - (overviewDrag?.grabDelta ?? 0);
-    clip.offsetSec = Math.min(
-      OFFSET_LIMIT,
-      Math.max(-OFFSET_LIMIT, Math.min(Math.max(target, 0), maxStart)),
-    );
-    clip.offsetDirty = true;
+    seekClipToT(t, center ? videoDur / 2 : (overviewDrag?.grabDelta ?? 0));
   };
 
   let overviewDrag: { grabDelta: number; downX: number; downY: number; moved: boolean } | null =
@@ -3330,6 +3428,92 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   });
   activityCanvas.addEventListener('pointercancel', () => {
     overviewDrag = null;
+  });
+
+  let lastMapSig = '';
+  const paintActivityMap = (tt: number): void => {
+    const proj =
+      activity && activity.durationSec > 0
+        ? projectGpsTrack(activity.samples, 0, 0, mapCanvas.width, mapCanvas.height)
+        : null;
+    if (!proj || !activity) {
+      if (!mapCanvas.hidden) {
+        mapCanvas.hidden = true;
+        lastMapSig = '';
+      }
+      return;
+    }
+    mapCanvas.hidden = false;
+    const sig = `${tt.toFixed(2)}|${activity.samples.length}|${clips.map((c) => `${c.id}:${c.offsetSec}:${c.trimStart}:${c.trimEnd ?? ''}:${c.status}`).join(',')}|${selectedClipId}|${mapCanvas.width}x${mapCanvas.height}`;
+    if (sig === lastMapSig) return;
+    lastMapSig = sig;
+    mapCtx.fillStyle = '#ffffff';
+    mapCtx.fillRect(0, 0, mapCanvas.width, mapCanvas.height);
+    const { pts, x: X, y: Y } = proj;
+    mapCtx.save();
+    mapCtx.lineJoin = 'round';
+    mapCtx.lineCap = 'round';
+    mapCtx.strokeStyle = '#c9c9c9';
+    mapCtx.lineWidth = 3;
+    mapCtx.beginPath();
+    pts.forEach(([lon, lat], i) => {
+      if (i === 0) mapCtx.moveTo(X(lon), Y(lat));
+      else mapCtx.lineTo(X(lon), Y(lat));
+    });
+    mapCtx.stroke();
+    // Clip windows as route segments (selected blue, like the graph).
+    for (const clip of clips) {
+      const [winStart, winEnd] = clipWindow(clip);
+      const selected = clip.id === selectedClipId;
+      mapCtx.strokeStyle = selected ? '#0099ff' : '#898989';
+      mapCtx.lineWidth = selected ? 5 : 4;
+      mapCtx.beginPath();
+      let started = false;
+      for (const [lon, lat, t] of pts) {
+        if (t < winStart || t > winEnd) continue;
+        if (!started) {
+          mapCtx.moveTo(X(lon), Y(lat));
+          started = true;
+        } else mapCtx.lineTo(X(lon), Y(lat));
+      }
+      if (started) mapCtx.stroke();
+    }
+    mapCtx.fillStyle = '#101010';
+    mapCtx.fillRect(X(pts[0][0]) - 3, Y(pts[0][1]) - 3, 6, 6);
+    const now = sampleAt(activity, tt);
+    if (typeof now.lat === 'number' && typeof now.lon === 'number') {
+      mapCtx.fillStyle = '#0099ff';
+      mapCtx.strokeStyle = '#ffffff';
+      mapCtx.lineWidth = 2;
+      mapCtx.beginPath();
+      mapCtx.arc(X(now.lon), Y(now.lat), 6, 0, 2 * Math.PI);
+      mapCtx.fill();
+      mapCtx.stroke();
+    }
+    mapCtx.restore();
+  };
+
+  // Map click (no drag): center the active clip window on the nearest fix.
+  let mapDown: { x: number; y: number } | null = null;
+  mapCanvas.addEventListener('pointerdown', (e) => {
+    mapDown = { x: e.clientX, y: e.clientY };
+  });
+  mapCanvas.addEventListener('pointerup', (e) => {
+    const down = mapDown;
+    mapDown = null;
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4) return;
+    const clip = activeClip();
+    if (!clip || !activity || activity.durationSec <= 0 || mapCanvas.hidden) return;
+    const proj = projectGpsTrack(activity.samples, 0, 0, mapCanvas.width, mapCanvas.height);
+    if (!proj) return;
+    const rect = mapCanvas.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * mapCanvas.width;
+    const py = ((e.clientY - rect.top) / rect.height) * mapCanvas.height;
+    const videoDur = clip.duration > 0 ? clip.duration : 0;
+    seekClipToT(nearestGpsT(proj, px, py), videoDur / 2);
+  });
+  mapCanvas.addEventListener('pointercancel', () => {
+    mapDown = null;
   });
 
   const syncPlayBtn = (): void => {
@@ -3941,11 +4125,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
           );
         }
         paintSelection();
-        teleClock.textContent = t('stage.tele', { t: formatSpan(activity.durationSec), suffix: '' });
+        teleClock.textContent = '';
         teleClock.classList.toggle('out-of-range', false);
         repaintThumbs(sampleAt(activity, activity.durationSec));
       } else {
-        teleClock.textContent = t('stage.teleNone');
+        teleClock.textContent = '';
         repaintThumbs(DEMO_SAMPLE);
       }
     } else if (video.src && video.readyState >= 2 && video.videoWidth > 0) {
@@ -3978,24 +4162,22 @@ export async function renderApp(root: HTMLElement): Promise<void> {
           );
         }
         if (drawLive) paintSelection();
-        teleClock.textContent = t('stage.tele', {
-          t: formatSpan(sample.t),
-          suffix: inRange ? '' : t('stage.outOfRange'),
-        });
+        teleClock.textContent = inRange ? '' : t('stage.outOfRange').trim();
         teleClock.classList.toggle('out-of-range', !inRange);
         repaintThumbs(sample);
       } else {
-        teleClock.textContent = t('stage.teleNone');
+        teleClock.textContent = '';
         repaintThumbs({ ...DEMO_SAMPLE, t: vt });
       }
     } else if (!video.src) {
-      teleClock.textContent = t('stage.teleNone');
+      teleClock.textContent = '';
       repaintThumbs(DEMO_SAMPLE);
       if (video.networkState === HTMLMediaElement.NETWORK_NO_SOURCE) paintPlaceholder();
     }
     syncBinMeta();
     syncInspector();
     paintOverview(activity ? vt + offsetSec : 0);
+    paintActivityMap(activity ? vt + offsetSec : 0);
     requestAnimationFrame(tick);
   };
   syncBin();

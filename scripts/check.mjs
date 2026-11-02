@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activityAvailability, activityFromIntervalsStreams, activityFromTrackPoints, buildActivity, activityStartFromOffset, fillDerivedGrade, formatFixedZone, formatInZone, formatUtc, parseActivityStart, zoneOffsetHours, zoneOffsetName, nextProfileWindow, parseFit, parseGotoTime, sampleAt, summarize, widgetValue, zonedTimeToUtc } from '../web/src/telemetry.ts';
+import { activityAvailability, activityFromIntervalsStreams, activityFromTrackPoints, buildActivity, activityStartFromOffset, distanceAxisTicks, fillDerivedGrade, formatFixedZone, formatInZone, formatUtc, parseActivityStart, seriesCoverage, timeAxisTicks, zoneOffsetHours, zoneOffsetName, nextProfileWindow, parseFit, parseGotoTime, sampleAt, summarize, widgetValue, zonedTimeToUtc } from '../web/src/telemetry.ts';
 import { hashPassword, needsRehash, normalizeEmail, storedIterations, validatePassword, verifyPassword } from '../api/src/password.ts';
 import {
   AUTO_JSON_SCHEMA,
@@ -52,7 +52,7 @@ import {
   navWindow,
   nextWidgetId,
 } from '../web/src/widgets.ts';
-import { gradeAngle } from '../web/src/overlay.ts';
+import { collectGpsPts, gradeAngle, nearestGpsT, projectGpsTrack } from '../web/src/overlay.ts';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fitBytes = readFileSync(join(root, 'fixtures/activity/sample.fit'));
@@ -711,6 +711,60 @@ assert.ok(Math.abs(gradeAngle(20) - Math.atan(0.2) * 2) < 1e-12);
 assert.equal(gradeAngle(100), Math.PI / 4);
 assert.equal(gradeAngle(-200), -Math.PI / 4);
 assert.ok(gradeAngle(-50) < 0 && gradeAngle(50) > 0);
+// Sync minimap: GPS projection shared by the map widget (paint == hit-test).
+const gpsPts = collectGpsPts(act.samples);
+assert.ok(gpsPts.length >= 2);
+assert.equal(gpsPts[0][2], 0);
+for (let i = 1; i < gpsPts.length; i++) assert.ok(gpsPts[i][2] >= gpsPts[i - 1][2]);
+const proj = projectGpsTrack(act.samples, 0, 0, 1400, 150);
+assert.ok(proj);
+for (const [lon, lat] of proj.pts) {
+  const px = proj.x(lon);
+  const py = proj.y(lat);
+  assert.ok(px >= 0 && px <= 1400 && py >= 0 && py <= 150);
+}
+assert.equal(nearestGpsT(proj, proj.x(proj.pts[0][0]), proj.y(proj.pts[0][1])), proj.pts[0][2]);
+const farT = nearestGpsT(proj, -5000, 9000);
+assert.ok(farT >= 0 && farT <= act.durationSec);
+assert.equal(projectGpsTrack([], 0, 0, 1400, 150), null);
+assert.equal(projectGpsTrack([{ t: 0, lat: 1, lon: 2 }], 0, 0, 1400, 150), null);
+assert.ok(STRINGS.es['act.mapAria'].length > 0 && STRINGS.en['act.mapAria'].length > 0);
+// Sync graph axes: nice time steps + km crossings by distance.
+assert.deepEqual(timeAxisTicks(300), [0, 60, 120, 180, 240, 300]);
+assert.deepEqual(timeAxisTicks(0), [0]);
+const longTicks = timeAxisTicks(3957);
+assert.ok(longTicks.length <= 8 && longTicks[0] === 0 && longTicks[longTicks.length - 1] === 3957);
+assert.deepEqual(
+  distanceAxisTicks([
+    { t: 0, distance: 0 },
+    { t: 10, distance: 1000 },
+    { t: 20, distance: 2000 },
+  ]),
+  [
+    { t: 10, km: 1 },
+    { t: 20, km: 2 },
+  ],
+);
+assert.deepEqual(distanceAxisTicks([{ t: 0 }, { t: 1 }]), []);
+const fitKm = distanceAxisTicks(act.samples);
+assert.ok(fitKm.length > 0 && fitKm.length <= 7);
+for (let i = 1; i < fitKm.length; i++) {
+  assert.ok(fitKm[i].t >= fitKm[i - 1].t && fitKm[i].km > fitKm[i - 1].km);
+}
+// Sync graph metric eligibility: most of the ride must carry the series.
+assert.ok(seriesCoverage(act.samples, 'power') > 0.5);
+assert.ok(seriesCoverage(act.samples, 'elevation') > 0.5);
+assert.equal(seriesCoverage([], 'power'), 0);
+assert.equal(
+  seriesCoverage(
+    [
+      { t: 0 },
+      { t: 1, power: 5 },
+    ],
+    'power',
+  ),
+  0.5,
+);
 
 // AI helpers: extraction, output shapes, naming, prompt constraints.
 assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
