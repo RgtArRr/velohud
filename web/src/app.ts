@@ -1753,7 +1753,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     adjustErr.hidden = true;
     const target = adjustTarget;
     const aspect = activeClip() ? classifyAspect(canvas.width, canvas.height) : 'vertical';
-    void adjustAiTemplate(effectiveTemplate(target), instruction, aspect).then((result) => {
+    void adjustAiTemplate(effectiveTemplate(target), instruction, aspect, aiAvailable()).then((result) => {
       adjusting = false;
       syncImproveBtn();
       adjustDialog.inert = false;

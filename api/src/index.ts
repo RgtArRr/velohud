@@ -608,13 +608,16 @@ export default {
       if (!instruction) return send(json({ error: 'instruction required' }, 400));
       const creds = requireAiCreds(env);
       if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      // Prompt-level availability only: the full schema stays so existing
+      // widgets round-trip even when outside the current activity's data.
+      const adjustAvail = parseAvailability(ctx.body);
       return runAiGenerate(send, async () => {
         const base = parseTemplateJson(JSON.stringify(ctx.body?.['template']));
         return generateTemplateJson({
           endpoint: creds.endpoint,
           key: creds.key,
           model: env.AI_MODEL || AI_DEFAULT_MODEL,
-          system: buildAdjustSystemPrompt(ctx.aspect),
+          system: buildAdjustSystemPrompt(ctx.aspect, adjustAvail),
           prompt: `Current template:\n${JSON.stringify(base)}\n\nInstruction:\n${instruction}`,
           temperature: 0.2,
         });

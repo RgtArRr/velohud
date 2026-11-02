@@ -367,6 +367,7 @@ export async function adjustAiTemplate(
   template: Template,
   instruction: string,
   aspect: string,
+  available?: AiDataAvailability,
 ): Promise<Template | AiFailure> {
   try {
     const res = await apiFetch(
@@ -374,7 +375,7 @@ export async function adjustAiTemplate(
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template, instruction, aspect }),
+        body: JSON.stringify({ template, instruction, aspect, available }),
       },
       0,
       150_000,

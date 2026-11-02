@@ -9,6 +9,7 @@ import {
   AUTO_JSON_SCHEMA,
   AUTO_WIDGET_POOL,
   TEMPLATE_JSON_SCHEMA,
+  adjustAvailabilityLine,
   availabilityLine,
   buildAdjustSystemPrompt,
   buildAutoSystemPrompt,
@@ -825,6 +826,12 @@ assert.ok(!buildAutoSystemPrompt().includes('Available rider data'));
 const line = availabilityLine({ metrics: ['power'], hasGps: false });
 assert.ok(line.includes('power') && line.includes('EMPTY') && line.includes('No GPS track'));
 assert.ok(buildAutoSystemPrompt('vertical', { metrics: ['power'], hasGps: false }).includes('No GPS track'));
+// Adjust: availability guides new widgets only; existing ones are untouchable.
+assert.equal(adjustAvailabilityLine(null), '');
+assert.ok(!buildAdjustSystemPrompt().includes('Available rider data'));
+const adjustLine = buildAdjustSystemPrompt('vertical', { metrics: ['power'], hasGps: true });
+assert.ok(adjustLine.includes('Available rider data') && adjustLine.includes('Widgets you ADD'));
+assert.ok(adjustLine.includes('NEVER rewrite or drop existing widgets'));
 
 // resolve: same vmin numbers render identical pixels on both orientations.
 const sq = { ax: 'left', ay: 'top', px: 0, py: 0, w: 25, h: 25 };

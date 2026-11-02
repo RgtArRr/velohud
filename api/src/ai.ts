@@ -220,17 +220,34 @@ const METRIC_WORDS: Record<string, string> = {
   gears: 'gears',
 };
 
+/** Validated metric ids + human words for the availability prompt lines. */
+function availVocabulary(avail: AiAvailability): { ids: string[]; words: string[] } {
+  const ids = avail.metrics.filter((m) => m in METRIC_WORDS);
+  if (!ids.includes('elapsedTime')) ids.push('elapsedTime');
+  const words = ids.map((m) => METRIC_WORDS[m]);
+  if (avail.hasGps) words.push('GPS track');
+  return { ids, words };
+}
+
 /**
  * Availability constraint for create prompts. Empty when unknown (fail open).
  * Names the data the model may use; anything else renders an empty widget.
  */
 export function availabilityLine(avail: AiAvailability | null): string {
   if (!avail) return '';
-  const ids = avail.metrics.filter((m) => m in METRIC_WORDS);
-  if (!ids.includes('elapsedTime')) ids.push('elapsedTime');
-  const words = ids.map((m) => METRIC_WORDS[m]);
-  if (avail.hasGps) words.push('GPS track');
+  const { ids, words } = availVocabulary(avail);
   return `- Available rider data: ${words.join(', ')}. EVERY widget metric MUST be one of: ${ids.join(', ')}. Any other metric renders an EMPTY widget — never emit one.${avail.hasGps ? '' : ' No GPS track: map/compass widgets are unavailable.'}`;
+}
+
+/**
+ * Availability guidance for adjust prompts. New widgets must use available
+ * data, but existing widgets are untouchable even outside the list (the
+ * template may come from another activity).
+ */
+export function adjustAvailabilityLine(avail: AiAvailability | null): string {
+  if (!avail) return '';
+  const { ids, words } = availVocabulary(avail);
+  return `- Available rider data: ${words.join(', ')}. Widgets you ADD must use a metric from: ${ids.join(', ')}. NEVER rewrite or drop existing widgets for data reasons — copy them byte-for-byte even when their metric is outside this list.`;
 }
 
 /** Shared design guidance once the task head is set. English-only: better results. */
@@ -277,11 +294,15 @@ ${designGuidance(aspect)}${line ? `\n${line}` : ''}`;
 }
 
 /** System prompt for adjusting a template. */
-export function buildAdjustSystemPrompt(aspect: AspectClass = 'vertical'): string {
+export function buildAdjustSystemPrompt(
+  aspect: AspectClass = 'vertical',
+  avail: AiAvailability | null = null,
+): string {
+  const line = adjustAvailabilityLine(avail);
   return `You modify velohud overlay templates. You receive the current template plus an instruction. Respond with the FULL updated template object matching the provided JSON schema. Preserve everything the instruction does not change; keep the same "name" unless asked to rename.
 Edit surgically: change ONLY the widgets the instruction names, and ONLY what it asks about them. Copy every other widget byte-for-byte identical — same layout numbers, same style. Never reflow, realign or restyle the rest.
 
-${designGuidance(aspect)}`;
+${designGuidance(aspect)}${line ? `\n${line}` : ''}`;
 }
 
 /** Pull the first {...} JSON block out of model text (fenced or bare). */
