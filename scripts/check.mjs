@@ -3,17 +3,20 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activityFromIntervalsStreams, activityFromTrackPoints, buildActivity, activityStartFromOffset, fillDerivedGrade, formatFixedZone, formatInZone, formatUtc, parseActivityStart, zoneOffsetHours, zoneOffsetName, nextProfileWindow, parseFit, parseGotoTime, sampleAt, summarize, widgetValue, zonedTimeToUtc } from '../web/src/telemetry.ts';
+import { activityAvailability, activityFromIntervalsStreams, activityFromTrackPoints, buildActivity, activityStartFromOffset, fillDerivedGrade, formatFixedZone, formatInZone, formatUtc, parseActivityStart, zoneOffsetHours, zoneOffsetName, nextProfileWindow, parseFit, parseGotoTime, sampleAt, summarize, widgetValue, zonedTimeToUtc } from '../web/src/telemetry.ts';
 import { hashPassword, needsRehash, normalizeEmail, storedIterations, validatePassword, verifyPassword } from '../api/src/password.ts';
 import {
   AUTO_JSON_SCHEMA,
+  AUTO_WIDGET_POOL,
   TEMPLATE_JSON_SCHEMA,
+  availabilityLine,
   buildAdjustSystemPrompt,
   buildAutoSystemPrompt,
   buildSystemPrompt,
   extractJson,
   extractOutputText,
   parseAiTemplate,
+  requestSchema,
 } from '../api/src/ai.ts';
 import { STRINGS, resolveLocale, setLocale, t } from '../web/src/i18n.ts';
 import {
@@ -763,6 +766,65 @@ assert.ok(buildAutoSystemPrompt().includes('video frame'));
 assert.ok(buildAutoSystemPrompt().includes('white text'));
 assert.ok(buildAutoSystemPrompt().includes('NEVER describe the video content'));
 assert.ok(buildAdjustSystemPrompt('square').includes('SQUARE (720x720)'));
+// Availability: sample.fit carries every metric + GPS + gears.
+assert.deepEqual(activityAvailability(act).metrics, [
+  'speed',
+  'pace',
+  'heartRate',
+  'power',
+  'cadence',
+  'elevation',
+  'distance',
+  'elapsedTime',
+  'grade',
+  'vam',
+  'gears',
+]);
+assert.equal(activityAvailability(act).hasGps, true);
+// Derived metrics resolve to their source; GPS needs a lat/lon fix.
+const sparseAvail = activityAvailability(
+  buildActivity(new Date(0), [
+    { t: 0, speed: 3 },
+    { t: 60, speed: 4 },
+  ]),
+);
+assert.deepEqual(sparseAvail.metrics, ['speed', 'pace', 'elapsedTime']);
+assert.equal(sparseAvail.hasGps, false);
+// Auto pool: mainstream kinds only, never the specialists.
+for (const specialist of ['gears', 'vam', 'profilenext', 'map', 'ring', 'routedraw']) {
+  assert.ok(!AUTO_WIDGET_POOL.includes(specialist), `auto pool excludes ${specialist}`);
+}
+for (const mainstream of ['stat', 'gauge', 'spark', 'profile', 'navmap', 'compass']) {
+  assert.ok(AUTO_WIDGET_POOL.includes(mainstream), `auto pool keeps ${mainstream}`);
+}
+// Null availability fails open to the base schemas (same reference).
+assert.equal(requestSchema(false, null), TEMPLATE_JSON_SCHEMA);
+assert.equal(requestSchema(true, null), AUTO_JSON_SCHEMA);
+// Gating: missing data narrows kinds + metrics (prompt mode keeps every viable kind).
+const gated = requestSchema(false, { metrics: ['speed', 'elapsedTime'], hasGps: false });
+const gatedKinds = gated.properties.widgets.items.properties.kind.enum;
+for (const out of ['map', 'navmap', 'compass', 'profile', 'profilenext', 'vam', 'slope', 'gears']) {
+  assert.ok(!gatedKinds.includes(out), `gated kind excludes ${out}`);
+}
+for (const kept of ['stat', 'number', 'gauge', 'speedo', 'ring', 'spark']) {
+  assert.ok(gatedKinds.includes(kept), `gated kind keeps ${kept}`);
+}
+assert.deepEqual(gated.properties.widgets.items.properties.metric.enum, ['speed', 'elapsedTime']);
+// Auto request: specialist metrics pruned even with data; 'none' rides with map kinds.
+const autoFull = requestSchema(true, { metrics: activityAvailability(act).metrics, hasGps: true });
+const autoKinds = autoFull.properties.widgets.items.properties.kind.enum;
+assert.deepEqual([...autoKinds].sort(), [...AUTO_WIDGET_POOL].sort());
+const autoMetrics = autoFull.properties.widgets.items.properties.metric.enum;
+assert.ok(!autoMetrics.includes('vam') && !autoMetrics.includes('gears'));
+assert.ok(autoMetrics.includes('none') && autoMetrics.includes('speed'));
+assert.ok(autoMetrics.includes('elapsedTime'));
+// Prompt line names the data and bans the rest; absent without availability.
+assert.equal(availabilityLine(null), '');
+assert.ok(!buildSystemPrompt().includes('Available rider data'));
+assert.ok(!buildAutoSystemPrompt().includes('Available rider data'));
+const line = availabilityLine({ metrics: ['power'], hasGps: false });
+assert.ok(line.includes('power') && line.includes('EMPTY') && line.includes('No GPS track'));
+assert.ok(buildAutoSystemPrompt('vertical', { metrics: ['power'], hasGps: false }).includes('No GPS track'));
 
 // resolve: same vmin numbers render identical pixels on both orientations.
 const sq = { ax: 'left', ay: 'top', px: 0, py: 0, w: 25, h: 25 };

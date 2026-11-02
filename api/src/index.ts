@@ -1,12 +1,13 @@
 import { TEMPLATE_SCHEMA_VERSION, parseTemplateJson, type AspectClass } from '@velohud/shared';
 import {
   AI_DEFAULT_MODEL,
-  AUTO_JSON_SCHEMA,
   buildAdjustSystemPrompt,
   buildAutoSystemPrompt,
   buildSystemPrompt,
   generateTemplateJson,
   parseAiTemplate,
+  requestSchema,
+  type AiAvailability,
 } from './ai.js';
 import {
   SESSION_MAX_AGE,
@@ -201,6 +202,18 @@ const icuFailure = (res: { auth: boolean; status: number; retryAfter: string | n
 const parseAspect = (body: Record<string, unknown> | null): AspectClass => {
   const aspect = body?.['aspect'];
   return aspect === 'square' || aspect === 'horizontal' ? aspect : 'vertical';
+};
+
+/** Data-availability hint from the client; null when absent/malformed (fail open). */
+const parseAvailability = (body: Record<string, unknown> | null): AiAvailability | null => {
+  const raw = body?.['available'];
+  if (typeof raw !== 'object' || raw === null) return null;
+  const rec = raw as Record<string, unknown>;
+  if (!Array.isArray(rec['metrics'])) return null;
+  return {
+    metrics: rec['metrics'].filter((m): m is string => typeof m === 'string'),
+    hasGps: rec['hasGps'] === true,
+  };
 };
 
 /** AI credentials from env, or null when the worker is unconfigured. */
@@ -551,13 +564,15 @@ export default {
       if (!prompt) return send(json({ error: 'prompt required' }, 400));
       const creds = requireAiCreds(env);
       if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      const avail = parseAvailability(ctx.body);
       return runAiGenerate(send, () =>
         generateTemplateJson({
           endpoint: creds.endpoint,
           key: creds.key,
           model: env.AI_MODEL || AI_DEFAULT_MODEL,
-          system: buildSystemPrompt(ctx.aspect),
+          system: buildSystemPrompt(ctx.aspect, avail),
           prompt,
+          schema: requestSchema(false, avail),
         }),
       );
     }
@@ -571,15 +586,16 @@ export default {
       }
       const creds = requireAiCreds(env);
       if (!creds) return send(json({ error: 'ai_unconfigured' }, 503));
+      const autoAvail = parseAvailability(ctx.body);
       return runAiGenerate(send, () =>
         generateTemplateJson({
           endpoint: creds.endpoint,
           key: creds.key,
           model: env.AI_MODEL || AI_DEFAULT_MODEL,
-          system: buildAutoSystemPrompt(ctx.aspect),
+          system: buildAutoSystemPrompt(ctx.aspect, autoAvail),
           prompt: 'Design the best template for this video frame.',
           image,
-          schema: AUTO_JSON_SCHEMA,
+          schema: requestSchema(true, autoAvail),
         }),
       );
     }

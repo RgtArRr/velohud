@@ -17,6 +17,7 @@ import {
   type WidgetStyle,
 } from '@velohud/shared';
 import {
+  activityAvailability,
   activityFromIntervalsStreams,
   activityStartFromOffset,
   formatFixedZone,
@@ -74,6 +75,7 @@ import {
   saveCloudTemplate,
   saveIntervalsKey,
   type AccountUser,
+  type AiDataAvailability,
   type AiFailure,
   type IntervalsActivity,
 } from './auth.js';
@@ -87,6 +89,13 @@ function el<K extends keyof HTMLElementTagNameMap>(
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/** Sparkles glyph shared by every button that invokes the AI. */
+function mkAiIcon(): HTMLSpanElement {
+  const icon = el('span', 'icon icon-sparkles');
+  icon.setAttribute('aria-hidden', 'true');
+  return icon;
 }
 
 function mkSelectRow(
@@ -1415,6 +1424,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   ] as [NewMode, string][]) {
     const btn = el('button', 'seg-opt', text);
     btn.type = 'button';
+    if (mode === 'ai' || mode === 'auto') {
+      btn.classList.add('has-icon');
+      btn.prepend(mkAiIcon());
+    }
     btn.setAttribute('role', 'tab');
     btn.dataset.newMode = mode;
     modeTabs.appendChild(btn);
@@ -1433,8 +1446,11 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const autoBody = el('p', 'muted', t('ai.autoBody'));
   autoBody.hidden = true;
   const newActions = el('div', 'add-actions');
-  const primaryBtn = el('button', 'btn btn-primary', t('tpl.create'));
+  const primaryBtn = el('button', 'btn btn-primary has-icon');
   primaryBtn.type = 'button';
+  const primaryIcon = mkAiIcon();
+  const primaryLabel = el('span', undefined, t('tpl.create'));
+  primaryBtn.append(primaryIcon, primaryLabel);
   const newCancelBtn = el('button', 'btn', t('tpl.cancel'));
   newCancelBtn.type = 'button';
   newActions.append(primaryBtn, newCancelBtn);
@@ -1505,14 +1521,13 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   let newMode: NewMode = 'blank';
   let aiBusy = false;
   const syncPrimary = (): void => {
-    primaryBtn.textContent =
+    primaryLabel.textContent =
       aiBusy
         ? t('ai.generating')
-        : newMode === 'ai'
+        : newMode === 'ai' || newMode === 'auto'
           ? t('ai.generate')
-          : newMode === 'auto'
-            ? t('ai.auto')
-            : t('tpl.create');
+          : t('tpl.create');
+    primaryIcon.hidden = !aiBusy && newMode !== 'ai' && newMode !== 'auto';
     primaryBtn.disabled =
       aiBusy ||
       (newMode === 'import' && !fileInput.files?.length) ||
@@ -1531,6 +1546,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   };
   const aspectNow = (): string =>
     activeClip() ? classifyAspect(canvas.width, canvas.height) : 'vertical';
+  /** Data availability for AI create calls; undefined without an activity (server fails open). */
+  const aiAvailable = (): AiDataAvailability | undefined =>
+    activity ? activityAvailability(activity) : undefined;
   const runAiRequest = (req: Promise<Template | AiFailure>): void => {
     aiBusy = true;
     syncPrimary();
@@ -1614,7 +1632,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (newMode === 'ai') {
       const prompt = promptInput.value.trim();
       if (!prompt) return;
-      runAiRequest(generateAiTemplate(prompt, aspectNow()));
+      runAiRequest(generateAiTemplate(prompt, aspectNow(), aiAvailable()));
       return;
     }
     const image = captureFrame();
@@ -1622,7 +1640,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       showToast(t('ai.needClip'));
       return;
     }
-    runAiRequest(autoAiTemplate(image, aspectNow()));
+    runAiRequest(autoAiTemplate(image, aspectNow(), aiAvailable()));
   });
   setNewMode('blank');
   const AI_CONSENT_KEY = 'override.aiConsent';
@@ -1689,8 +1707,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const adjustErr = el('p', 'import-err', t('ai.errInvalid'));
   adjustErr.hidden = true;
   const adjustActions = el('div', 'add-actions');
-  const improveBtn = el('button', 'btn btn-primary', t('ai.improve'));
+  const improveBtn = el('button', 'btn btn-primary has-icon');
   improveBtn.type = 'button';
+  const improveLabel = el('span', undefined, t('ai.improve'));
+  improveBtn.append(mkAiIcon(), improveLabel);
   const adjustCancelBtn = el('button', 'btn', t('tpl.cancel'));
   adjustCancelBtn.type = 'button';
   adjustActions.append(improveBtn, adjustCancelBtn);
@@ -1700,7 +1720,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   let adjusting = false;
   const syncImproveBtn = (): void => {
     improveBtn.disabled = adjusting || !adjustInput.value.trim();
-    improveBtn.textContent = adjusting ? t('ai.generating') : t('ai.improve');
+    improveLabel.textContent = adjusting ? t('ai.generating') : t('ai.improve');
   };
   const openAdjustDialog = (tpl: Template): void => {
     if (activeClip() === null || video.videoWidth === 0) {

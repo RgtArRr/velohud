@@ -145,6 +145,94 @@ export const AUTO_JSON_SCHEMA = (() => {
   return s;
 })();
 
+/**
+ * Auto mode pool: mainstream widgets only. Everything else (gears, vam,
+ * profilenext, map, ring) stays exclusive to prompt mode even when data exists.
+ */
+export const AUTO_WIDGET_POOL: readonly string[] = [
+  'stat',
+  'number',
+  'gauge',
+  'speedo',
+  'slope',
+  'spark',
+  'profile',
+  'navmap',
+  'compass',
+];
+
+/** Kinds that need a GPS track (lat/lon series). */
+const GPS_GATED_KINDS: readonly string[] = ['map', 'navmap', 'compass'];
+/** Kinds that need an elevation series. */
+const ELEVATION_GATED_KINDS: readonly string[] = ['profile', 'profilenext', 'vam'];
+
+/** Client data-availability hint: metric ids with data, plus GPS presence. */
+export interface AiAvailability {
+  metrics: string[];
+  hasGps: boolean;
+}
+
+/**
+ * Per-request constrained schema: base pool (auto = mainstream only) minus
+ * kinds whose data is missing, metrics narrowed to the available ids.
+ * Null availability fails open to the base schema (no activity / old client).
+ */
+export function requestSchema(auto: boolean, avail: AiAvailability | null): Record<string, unknown> {
+  const base = auto ? AUTO_JSON_SCHEMA : TEMPLATE_JSON_SCHEMA;
+  if (!avail) return base;
+  const s = JSON.parse(JSON.stringify(base)) as typeof TEMPLATE_JSON_SCHEMA;
+  const items = s.properties.widgets.items.properties;
+  const has = (m: string): boolean => avail.metrics.includes(m);
+  const pool = (auto ? AUTO_WIDGET_POOL : items.kind.enum).filter(
+    (k) =>
+      !(GPS_GATED_KINDS.includes(k) && !avail.hasGps) &&
+      !(ELEVATION_GATED_KINDS.includes(k) && !has('elevation')) &&
+      !(k === 'slope' && !has('grade')) &&
+      !(k === 'gears' && !has('gears')),
+  );
+  // Degenerate input cannot empty the enum: stat/number over the always-present clock.
+  const kinds = pool.length > 0 ? pool : ['stat', 'number'];
+  items.kind.enum = kinds;
+  const gpsLeft = kinds.some((k) => GPS_GATED_KINDS.includes(k));
+  // vam/gears metrics render only through their own kinds; 'none' only via map kinds.
+  const metrics = items.metric.enum.filter(
+    (m) =>
+      m === 'elapsedTime' ||
+      m === 'none' ||
+      (has(m) && !(m === 'vam' && !kinds.includes('vam')) && !(m === 'gears' && !kinds.includes('gears'))),
+  );
+  items.metric.enum = gpsLeft ? metrics : metrics.filter((m) => m !== 'none');
+  return s;
+}
+
+/** Human metric names for the availability prompt line. */
+const METRIC_WORDS: Record<string, string> = {
+  speed: 'speed',
+  pace: 'pace (min/km)',
+  heartRate: 'heart rate',
+  power: 'power',
+  cadence: 'cadence',
+  elevation: 'elevation',
+  distance: 'distance',
+  elapsedTime: 'elapsed time',
+  grade: 'grade',
+  vam: 'VAM',
+  gears: 'gears',
+};
+
+/**
+ * Availability constraint for create prompts. Empty when unknown (fail open).
+ * Names the data the model may use; anything else renders an empty widget.
+ */
+export function availabilityLine(avail: AiAvailability | null): string {
+  if (!avail) return '';
+  const ids = avail.metrics.filter((m) => m in METRIC_WORDS);
+  if (!ids.includes('elapsedTime')) ids.push('elapsedTime');
+  const words = ids.map((m) => METRIC_WORDS[m]);
+  if (avail.hasGps) words.push('GPS track');
+  return `- Available rider data: ${words.join(', ')}. EVERY widget metric MUST be one of: ${ids.join(', ')}. Any other metric renders an EMPTY widget — never emit one.${avail.hasGps ? '' : ' No GPS track: map/compass widgets are unavailable.'}`;
+}
+
 /** Shared design guidance once the task head is set. English-only: better results. */
 function designGuidance(aspect: AspectClass): string {
   const target =
@@ -153,7 +241,7 @@ function designGuidance(aspect: AspectClass): string {
       : aspect === 'square'
         ? 'SQUARE (720x720)'
         : 'VERTICAL (720x1280)';
-  return `- 1-8 widgets. Prefer sensible metric+kind pairs (speed to gauge/speedo/number/stat, heartRate to stat/gauge, elevation+distance to profile, gears to gears, lat/lon to map). History kinds (spark/profile/profilenext/vam/map/navmap/compass) need a GPS series.
+  return `- 1-8 widgets. Prefer sensible metric+kind pairs (speed to gauge/speedo/number/stat, heartRate to stat/gauge, elevation+distance to profile, gears to gears, lat/lon to map). Map kinds (map/navmap/compass) need a GPS track; profile/profilenext/vam need elevation; slope needs grade; gears needs electronic-shifting data.
 - pace is min/km for running: use only when the user explicitly asks for pace.
 - Internal layout is fixed: label top, graphics middle, value placed per kind. You CANNOT move text inside a widget; move/resize the widget box instead.
 - All layout numbers are vmin % (percent of the frame's smaller side). Same numbers = same pixels on any aspect.
@@ -164,20 +252,28 @@ function designGuidance(aspect: AspectClass): string {
 }
 
 /** System prompt for creating a template. */
-export function buildSystemPrompt(aspect: AspectClass = 'vertical'): string {
+export function buildSystemPrompt(
+  aspect: AspectClass = 'vertical',
+  avail: AiAvailability | null = null,
+): string {
+  const line = availabilityLine(avail);
   return `You design velohud overlay templates. Respond with a single template object matching the provided JSON schema.
 
 - "name": short display name in ENGLISH.
-${designGuidance(aspect)}`;
+${designGuidance(aspect)}${line ? `\n${line}` : ''}`;
 }
 
 /** System prompt for automatic templates from a video frame. */
-export function buildAutoSystemPrompt(aspect: AspectClass = 'vertical'): string {
+export function buildAutoSystemPrompt(
+  aspect: AspectClass = 'vertical',
+  avail: AiAvailability | null = null,
+): string {
+  const line = availabilityLine(avail);
   return `You design velohud overlay templates from the attached video frame. Respond with a single template object matching the provided JSON schema.
 
 - "name": short GENERIC display name in ENGLISH, style-based (e.g. "The Sprint", "Night Pulse", "Apex Dash"). NEVER describe the video content (no "Road Group Ride").
 - Read the frame: white text/graphics on dark footage, black on bright footage. Every color must contrast with what is behind it.
-${designGuidance(aspect)}`;
+${designGuidance(aspect)}${line ? `\n${line}` : ''}`;
 }
 
 /** System prompt for adjusting a template. */

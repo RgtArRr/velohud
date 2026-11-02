@@ -604,6 +604,41 @@ export function summarize(activity: Activity): ActivitySummary {
   };
 }
 
+/** Which metrics carry data (plus GPS presence) so the AI only suggests viable widgets. */
+export interface DataAvailability {
+  metrics: MetricId[];
+  hasGps: boolean;
+}
+
+/**
+ * Availability scan over samples. Derived metrics resolve to their source:
+ * pace needs speed, vam needs elevation, grade is native or elevation+distance
+ * derived (buildActivity already filled it). elapsedTime is always available.
+ */
+export function activityAvailability(activity: Activity): DataAvailability {
+  const { samples } = activity;
+  const any = (pick: (s: TelemetrySample) => unknown): boolean =>
+    samples.some((s) => typeof pick(s) === 'number');
+  const metrics: MetricId[] = [];
+  const hasSpeed = any((s) => s.speed);
+  if (hasSpeed) metrics.push('speed');
+  if (hasSpeed) metrics.push('pace');
+  if (any((s) => s.heartRate)) metrics.push('heartRate');
+  if (any((s) => s.power)) metrics.push('power');
+  if (any((s) => s.cadence)) metrics.push('cadence');
+  const hasElevation = any((s) => s.elevation);
+  if (hasElevation) metrics.push('elevation');
+  if (any((s) => s.distance)) metrics.push('distance');
+  metrics.push('elapsedTime');
+  if (any((s) => s.grade)) metrics.push('grade');
+  if (hasElevation) metrics.push('vam');
+  if (any((s) => s.frontGear ?? s.rearGear ?? s.frontGearNum ?? s.rearGearNum)) {
+    metrics.push('gears');
+  }
+  const hasGps = samples.some((s) => typeof s.lat === 'number' && typeof s.lon === 'number');
+  return { metrics, hasGps };
+}
+
 /** Forward-looking profile: 5 min ahead of the dot. */
 export const PROFILE_NEXT_AHEAD_SEC = 300;
 /** Dot sits ~0.5 km ahead of the rendered start (distance mode). */

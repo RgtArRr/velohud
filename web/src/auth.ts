@@ -325,10 +325,17 @@ export async function saveCloudTemplate(
 
 export type AiFailure = 'login' | 'invalid' | 'net';
 
+/** Data-availability hint: metric ids with data, plus GPS presence. Names only, no values. */
+export interface AiDataAvailability {
+  metrics: string[];
+  hasGps: boolean;
+}
+
 /** Generate a template from a prompt; the model may also name it. No retries. */
 export async function generateAiTemplate(
   prompt: string,
   aspect: string,
+  available?: AiDataAvailability,
 ): Promise<Template | AiFailure> {
   try {
     const res = await apiFetch(
@@ -336,7 +343,7 @@ export async function generateAiTemplate(
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, aspect }),
+        body: JSON.stringify({ prompt, aspect, available }),
       },
       0,
       150_000,
@@ -387,14 +394,18 @@ export async function adjustAiTemplate(
 }
 
 /** Automatic template from a video frame (black/white, no prompt). No retries. */
-export async function autoAiTemplate(image: string, aspect: string): Promise<Template | AiFailure> {
+export async function autoAiTemplate(
+  image: string,
+  aspect: string,
+  available?: AiDataAvailability,
+): Promise<Template | AiFailure> {
   try {
     const res = await apiFetch(
       '/api/ai/auto',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image, aspect }),
+        body: JSON.stringify({ image, aspect, available }),
       },
       0,
       150_000,

@@ -982,7 +982,7 @@ a {
   display: flex;
 }
 
-/* New-template tabs: labels must read whole ("Automática"), wrap if needed. */
+/* New-template tabs: labels wrap between words only, never mid-word ("Auto-mática"). */
 .seg-switch.fill.tab-bar {
   margin-bottom: 12px;
 }
@@ -990,8 +990,8 @@ a {
 .seg-switch.fill.tab-bar .seg-opt {
   white-space: normal;
   overflow: visible;
-  overflow-wrap: break-word;
-  hyphens: auto;
+  overflow-wrap: normal;
+  hyphens: manual;
   line-height: 1.15;
   font-size: 12px;
   padding: 5px 6px;
@@ -1117,8 +1117,41 @@ a {
   width: 14px;
   height: 14px;
   background: currentColor;
+}
+
+/* AI affordance: every button that invokes the AI carries the sparkles glyph. */
+.icon-sparkles {
   -webkit-mask: url('/icons/sparkles.svg') no-repeat center / contain;
   mask: url('/icons/sparkles.svg') no-repeat center / contain;
+}
+
+.btn.has-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.btn.has-icon .icon {
+  width: 16px;
+  height: 16px;
+  background: currentColor;
+  flex: none;
+}
+
+.tab-bar .seg-opt.has-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.tab-bar .seg-opt.has-icon .icon {
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  flex: none;
 }
 
 .play-btn {
