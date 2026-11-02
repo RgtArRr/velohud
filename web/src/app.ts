@@ -607,7 +607,6 @@ export async function renderApp(root: HTMLElement): Promise<void> {
 
   // Left column: activity block above the media bin.
   const leftCol = el('div', 'left-col');
-  // Pointer profile first: drop copy below adapts to touch (no drag on phones).
   const touchCapable = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
   const coarsePointer =
     (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||

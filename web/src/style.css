@@ -1437,8 +1437,6 @@ a {
   color: var(--muted);
 }
 
-/* Big tap targets on touch pointers and phone widths (small screens are
-   ~always touch; desktop keeps its geometry). Last to win base-rule ties. */
 @media (pointer: coarse), (max-width: 640px) {
   .play-btn {
     padding: 12px;
@@ -1467,5 +1465,11 @@ a {
   .unit-check {
     width: 22px;
     height: 22px;
+  }
+  .name-input,
+  .trim-input,
+  .font-select,
+  .tz-select {
+    font-size: 16px;
   }
 }
