@@ -607,9 +607,18 @@ export async function renderApp(root: HTMLElement): Promise<void> {
 
   // Left column: activity block above the media bin.
   const leftCol = el('div', 'left-col');
+  // Pointer profile first: drop copy below adapts to touch (no drag on phones).
+  const touchCapable = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
+  const coarsePointer =
+    (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||
+    (touchCapable && (window.matchMedia?.('(max-width: 640px)').matches ?? false));
   const activityBlock = el('section', 'activity-block');
   activityBlock.append(el('h2', undefined, t('activity.title')));
-  const activityDrop = el('div', 'activity-drop', t('activity.drop'));
+  const activityDrop = el(
+    'div',
+    'activity-drop',
+    t(coarsePointer ? 'activity.dropTouch' : 'activity.drop'),
+  );
   activityDrop.setAttribute('role', 'button');
   activityDrop.setAttribute('tabindex', '0');
   const activityInput = el('input');
@@ -992,7 +1001,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   videoInput.accept =
     'video/mp4,.mp4,video/quicktime,.mov,image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp';
   videoInput.multiple = true;
-  const binDrop = el('div', 'bin-drop', t('bin.drop'));
+  const binDrop = el('div', 'bin-drop', t(coarsePointer ? 'bin.dropTouch' : 'bin.drop'));
   binDrop.setAttribute('role', 'button');
   binDrop.setAttribute('tabindex', '0');
   binDrop.appendChild(videoInput);
@@ -1037,6 +1046,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const stage = el('section', 'stage');
   const video = el('video', 'source-video');
   video.preload = 'auto';
+  // iOS Safari takes over fullscreen on play unless the video is inline.
+  video.playsInline = true;
+  video.setAttribute('webkit-playsinline', '');
   video.setAttribute('aria-hidden', 'true');
   /** Which clip the current video src belongs to (loadedmetadata may land after a switch). */
   let srcClipId: number | null = null;
@@ -1065,10 +1077,6 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   const teleClock = el('span', undefined, '');
   const offsetClock = el('strong', undefined, formatOffset(0));
   clocks.append(playBtn, videoClock, teleClock, offsetClock);
-  const touchCapable = navigator.maxTouchPoints > 0 || 'ontouchstart' in window;
-  const coarsePointer =
-    (window.matchMedia?.('(pointer: coarse)').matches ?? false) ||
-    (touchCapable && (window.matchMedia?.('(max-width: 640px)').matches ?? false));
   const stageHint = el(
     'p',
     'muted',
@@ -3225,10 +3233,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   }
   // Activity overview: coarse clip positioning for long activities.
   const OVERVIEW_PAD = 10;
-  // Plot geometry: top margin + plot + two axis rows (time, km) below.
+  // Plot geometry: top margin + plot + axis rows below (time, then km).
   const OVERVIEW_TOP = 8;
   const AXIS_ROW_H = 30;
-  const AXIS_H = AXIS_ROW_H * 2 + 4;
+  const AXIS_GAP = 4;
   const AXIS_FONT = '400 20px Inter, system-ui, sans-serif';
   let overviewCache: { metric: OverviewMetric; min: number; max: number } | null = null;
   let axisCache: {
@@ -3276,12 +3284,14 @@ export async function renderApp(root: HTMLElement): Promise<void> {
 
   let lastOverviewSig = '';
   const paintOverview = (tt: number): void => {
-    const sig = `${tt.toFixed(2)}|${activity?.durationSec ?? -1}|${overviewCache ? `${overviewCache.metric}|${overviewCache.min}|${overviewCache.max}` : ''}|${clips.map((c) => `${c.id}:${c.offsetSec}:${c.trimStart}:${c.trimEnd ?? ''}:${c.status}`).join(',')}|${selectedClipId}|${activityCanvas.width}x${activityCanvas.height}`;
+    const axisRows = activityCanvas.clientWidth < 560 ? 1 : 2;
+    const sig = `${tt.toFixed(2)}|${activity?.durationSec ?? -1}|${overviewCache ? `${overviewCache.metric}|${overviewCache.min}|${overviewCache.max}` : ''}|${clips.map((c) => `${c.id}:${c.offsetSec}:${c.trimStart}:${c.trimEnd ?? ''}:${c.status}`).join(',')}|${selectedClipId}|${activityCanvas.width}x${activityCanvas.height}|ax${axisRows}`;
     if (sig === lastOverviewSig) return;
     lastOverviewSig = sig;
     const W = activityCanvas.width;
     const H = activityCanvas.height;
-    const plotH = H - OVERVIEW_TOP - AXIS_H;
+    // Narrow screens show the time axis only; the km row needs the width.
+    const plotH = H - OVERVIEW_TOP - (AXIS_ROW_H * axisRows + AXIS_GAP);
     const plotBase = OVERVIEW_TOP + plotH;
     activityCtx.fillStyle = '#ffffff';
     activityCtx.fillRect(0, 0, W, H);
@@ -3356,13 +3366,15 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       activityCtx.fillRect(x - 0.5, yTime, 1, 5);
       activityCtx.fillText(formatSpan(t), x, yTime + 7);
     }
-    const yKm = yTime + AXIS_ROW_H;
-    const kmTicks = axisCache.km;
-    kmTicks.forEach(({ t, km }, i) => {
-      const x = clampX(X(t));
-      activityCtx.fillRect(x - 0.5, yKm, 1, 5);
-      activityCtx.fillText(i === kmTicks.length - 1 ? `${km} km` : `${km}`, x, yKm + 7);
-    });
+    if (axisRows > 1) {
+      const yKm = yTime + AXIS_ROW_H;
+      const kmTicks = axisCache.km;
+      kmTicks.forEach(({ t, km }, i) => {
+        const x = clampX(X(t));
+        activityCtx.fillRect(x - 0.5, yKm, 1, 5);
+        activityCtx.fillText(i === kmTicks.length - 1 ? `${km} km` : `${km}`, x, yKm + 7);
+      });
+    }
     const clip = activeClip();
     activityLabel.textContent = clip
       ? t('act.labelClip', {

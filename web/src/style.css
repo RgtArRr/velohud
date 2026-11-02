@@ -681,7 +681,7 @@ a {
   border-radius: var(--radius-card);
   box-shadow: var(--shadow-card);
   cursor: pointer;
-  touch-action: none;
+  touch-action: pan-y;
   margin-bottom: 8px;
 }
 
@@ -1435,4 +1435,37 @@ a {
   margin: 4px 0 16px;
   padding-left: 20px;
   color: var(--muted);
+}
+
+/* Big tap targets on touch pointers and phone widths (small screens are
+   ~always touch; desktop keeps its geometry). Last to win base-rule ties. */
+@media (pointer: coarse), (max-width: 640px) {
+  .play-btn {
+    padding: 12px;
+  }
+  .card-ai,
+  .card-delete {
+    width: 40px;
+    height: 40px;
+  }
+  .icon-btn {
+    padding: 12px;
+  }
+  .seg-opt {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+  .seg-switch.fill .seg-opt {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+  .btn.btn-small {
+    padding-top: 13px;
+    padding-bottom: 13px;
+  }
+  .check input,
+  .unit-check {
+    width: 22px;
+    height: 22px;
+  }
 }

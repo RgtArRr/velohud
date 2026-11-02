@@ -4,7 +4,7 @@ export interface GateResult {
 }
 
 /**
- * Feature-detection gate. Safari/iOS lack WebCodecs, so they land here
+ * Feature-detection gate. Browsers without WebCodecs land here
  * instead of failing halfway through an upload.
  */
 export function checkSupport(): GateResult {

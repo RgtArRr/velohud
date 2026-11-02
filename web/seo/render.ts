@@ -376,7 +376,7 @@ export function llmsTxt(
     for (const g of guides.filter((x) => x.locale === locale)) lines.push(`- [${g.h1}](${g.mdUrl}): ${g.lede}`);
     lines.push('');
   }
-  lines.push('## App', '', `- [Open the app](${base}/app/): the editor itself (needs Chrome/Edge with WebCodecs).`, '');
+  lines.push('## App', '', `- [Open the app](${base}/app/): the editor itself (needs a WebCodecs-capable browser).`, '');
   return lines.join('\n');
 }
 

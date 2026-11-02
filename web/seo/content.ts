@@ -80,7 +80,7 @@ export const HUB: Record<Locale, HubCopy> = {
     formats: [
       'Video: MP4 y MOV con H.264. El HEVC de iPhone no decodifica en Chrome: conviértelo a H.264 primero.',
       'Telemetría: archivos .FIT, .GPX o .TCX con registros y marca temporal (Garmin y compatibles) o actividades de Intervals.icu.',
-      'Navegadores: Chrome y Edge en computadora y Android. Safari y iOS no tienen WebCodecs y no están soportados.',
+      'Navegadores: Chrome y Edge en computadora y Android, y Safari actual en iPhone/iPad. Se requiere WebCodecs: la app detecta si falta y te lo indica.',
       'Plantillas: 18 incluidas en 14 tipos de widget; crea las tuyas y expórtalas como JSON.',
     ],
     privTitle: 'Privado por diseño',
@@ -109,7 +109,7 @@ export const HUB: Record<Locale, HubCopy> = {
       },
       {
         q: '¿Funciona en mi navegador?',
-        a: 'En Chrome y Edge, en computadora y Android. Safari y todos los navegadores en iPhone/iPad no soportan WebCodecs, así que la app detecta el caso y te lo indica.',
+        a: 'En Chrome y Edge, en computadora y Android, y en Safari actual en iPhone/iPad. Si tu navegador no tiene WebCodecs, la app detecta el caso y te lo indica.',
       },
       {
         q: '¿Necesito crearme una cuenta?',
@@ -209,7 +209,7 @@ export const HUB: Record<Locale, HubCopy> = {
     formats: [
       'Video: MP4 and MOV in H.264. iPhone HEVC does not decode in Chrome: convert to H.264 first.',
       'Telemetry: .FIT, .GPX or .TCX files with timestamped records (Garmin and compatibles) or Intervals.icu activities.',
-      'Browsers: Chrome and Edge on desktop and Android. Safari and iOS lack WebCodecs and are not supported.',
+      'Browsers: Chrome and Edge on desktop and Android, and current Safari on iPhone/iPad. WebCodecs is required: the app detects when it is missing and tells you.',
       'Templates: 18 included across 14 widget kinds; build your own and export them as JSON.',
     ],
     privTitle: 'Private by design',
@@ -238,7 +238,7 @@ export const HUB: Record<Locale, HubCopy> = {
       },
       {
         q: 'Does it work in my browser?',
-        a: 'In Chrome and Edge, on desktop and Android. Safari and every browser on iPhone/iPad lack WebCodecs, so the app detects that case and tells you.',
+        a: 'In Chrome and Edge, on desktop and Android, and in current Safari on iPhone/iPad. If your browser lacks WebCodecs, the app detects that case and tells you.',
       },
       {
         q: 'Do I need an account?',
