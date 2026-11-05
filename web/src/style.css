@@ -6,11 +6,13 @@
   --surface: #ffffff;
   --ink: #101010;
   --graphite: #242424;
-  --muted: #6b7280;
+  /* Darkened from Cal.com slate for AA on paper; static pages already use this value. */
+  --muted: #5b6472;
   --stone: #898989;
   --border: #e5e7eb;
   --accent: #0099ff;
-  --accent-ink: #0077cc;
+  /* Body links + focus: AA on paper and white (4.8/5.3:1); static pages use the same. */
+  --accent-ink: #006fb9;
   --info-bg: #eff6fe;
   --danger: #b42318;
   --shadow-card: rgba(34, 42, 53, 0.05) 0px 4px 8px 0px;
@@ -41,7 +43,7 @@ body {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-ink);
   outline-offset: 2px;
 }
 
@@ -150,7 +152,7 @@ body {
 
 .activity-drop:focus-visible,
 .bin-drop:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--accent-ink);
   outline-offset: 2px;
 }
 
@@ -353,7 +355,7 @@ body {
 
 .clip-remove {
   grid-area: remove;
-  color: var(--stone);
+  color: var(--graphite);
   font-size: 18px;
   line-height: 1;
   padding: 0 2px;
@@ -490,6 +492,11 @@ body {
 .muted {
   color: var(--muted);
   font-size: 14px;
+  text-wrap: pretty;
+}
+
+.share-note {
+  margin: 0 0 12px;
 }
 .site-footer {
   display: flex;
@@ -1052,9 +1059,35 @@ a {
   overflow-x: auto;
   gap: 12px;
   margin-bottom: 16px;
+  margin-left: -12px;
   padding-bottom: 8px;
+  padding-left: 12px;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/* Trailing spacer: end padding doesn't scroll in Chrome, so the last card's inset comes from a flex item (negative margin absorbs the gap). */
+.template-cards::after {
+  content: '';
+  flex: none;
+  width: 12px;
+  margin-left: -12px;
+}
+
+/* Edge fades signal more cards; toggled from the strip's scroll position. */
+.template-cards.fade-r {
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
+}
+
+.template-cards.fade-l {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px);
+  mask-image: linear-gradient(90deg, transparent, #000 32px);
+}
+
+.template-cards.fade-l.fade-r {
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 32px, #000 calc(100% - 32px), transparent);
 }
 
 .template-cards::-webkit-scrollbar {
@@ -1086,6 +1119,7 @@ a {
 }
 
 .template-open {
+  position: relative;
   display: block;
   width: 100%;
   background: none;
@@ -1097,16 +1131,34 @@ a {
   text-align: left;
 }
 
-/* Shared 28px card-icon button geometry (export/delete/AI keep their own hooks). */
+/* "En uso" pill overlays the thumbnail (aria-hidden; selection is exposed via aria-pressed). */
+.in-use {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  padding: 2px 10px;
+  border-radius: var(--radius-pill);
+  pointer-events: none;
+}
+
+/* Shared 36px card-icon button geometry (each action keeps its own hook). */
 .card-export,
 .card-delete,
-.card-ai {
+.card-ai,
+.card-rename {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   padding: 0;
   border-radius: 8px;
   background: var(--surface);
@@ -1115,7 +1167,8 @@ a {
 }
 
 .card-export,
-.card-ai {
+.card-ai,
+.card-rename {
   color: var(--graphite);
 }
 
@@ -1124,8 +1177,18 @@ a {
   color: var(--ink);
 }
 
+.card-export:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.card-export:disabled:hover {
+  border-color: var(--border);
+  color: var(--graphite);
+}
+
 .card-delete {
-  color: var(--stone);
+  color: var(--graphite);
   font-size: 16px;
   line-height: 1;
 }
@@ -1135,7 +1198,8 @@ a {
   color: var(--danger);
 }
 
-.card-ai:hover {
+.card-ai:hover,
+.card-rename:hover {
   border-color: var(--ink);
   color: var(--ink);
 }
@@ -1212,6 +1276,14 @@ a {
   mask: url('/icons/download.svg') no-repeat center / contain;
 }
 
+.card-rename .icon {
+  width: 14px;
+  height: 14px;
+  background: currentColor;
+  -webkit-mask: url('/icons/edit.svg') no-repeat center / contain;
+  mask: url('/icons/edit.svg') no-repeat center / contain;
+}
+
 /* Icon-only segmented option: centered glyph button (widget text alignment). */
 .seg-switch .seg-opt.seg-icon {
   display: inline-flex;
@@ -1277,18 +1349,27 @@ a {
 
 .template-thumb {
   display: block;
-  height: 108px;
+  height: 132px;
   width: auto;
   border-radius: var(--radius-input);
-  background: #0d0d0d;
+  background: var(--ink);
 }
 
 .card-foot {
   display: flex;
   align-items: center;
   min-width: 0;
-  gap: 6px;
+  gap: 8px;
   padding: 8px 4px 4px;
+}
+
+/* Narrow cards (square/vertical video): the name takes its own row, actions wrap below. */
+.narrow-cards .card-foot {
+  flex-wrap: wrap;
+}
+
+.narrow-cards .template-name {
+  flex: 1 1 100%;
 }
 
 .template-name {
@@ -1319,7 +1400,7 @@ a {
 
 .template-card.new-template {
   background: var(--surface);
-  border: 1px solid var(--ink);
+  border: 2px solid var(--ink);
   cursor: pointer;
 }
 
@@ -1329,16 +1410,26 @@ a {
 
 .new-plus {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 108px;
-  font-size: 64px;
+  gap: 8px;
+  height: 132px;
+  font-size: 32px;
+  font-weight: 500;
   line-height: 1;
-  color: #000;
+  color: var(--ink);
+}
+
+.new-modes {
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--graphite);
 }
 
 .template-card.new-template .template-name {
-  color: #000;
+  color: var(--ink);
 }
 
 .name-input {

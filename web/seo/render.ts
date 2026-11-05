@@ -11,7 +11,7 @@ export const escHtml = (s: string): string => escXml(s).replace(/"/g, '&quot;');
 
 const OG_LOCALE: Record<Locale, string> = { es: 'es_ES', en: 'en_US' };
 
-const CONTENT_CSS = `:root{--paper:#f4f4f4;--surface:#fff;--ink:#101010;--graphite:#242424;--muted:#5b6472;--border:#e5e7eb;--accent:#0099ff;--accent-ink:#0077cc}
+const CONTENT_CSS = `:root{--paper:#f4f4f4;--surface:#fff;--ink:#101010;--graphite:#242424;--muted:#5b6472;--border:#e5e7eb;--accent:#0099ff;--accent-ink:#006fb9}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
 body{margin:0;background:var(--paper);color:var(--graphite);font:400 17px/1.65 Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
 .wrap{max-width:760px;margin:0 auto;padding:0 24px 64px}
@@ -51,7 +51,8 @@ footer.site a{color:var(--muted)}
 .example figcaption{color:var(--muted);font-size:14px;margin-top:8px}
 .donate{background:var(--surface);border-radius:12px;box-shadow:rgba(34,42,53,.05) 0 4px 8px 0;padding:8px 20px 20px;margin-top:8px}
 a{color:var(--accent-ink)}
-a:focus-visible,summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+main p,main li{max-width:60ch;text-wrap:pretty}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--accent-ink);outline-offset:2px}
 @media (max-width:560px){header.site{flex-wrap:wrap;row-gap:12px}nav.site{margin-left:0;flex-wrap:wrap;gap:12px}.cta{padding:10px 18px}}`;
 
 export interface HeadOpts {

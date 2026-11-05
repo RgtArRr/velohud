@@ -1195,10 +1195,14 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   stageTools.appendChild(addOpenBtn);
   wrap.appendChild(addDialog);
   templateBox.appendChild(templateHead);
+  const shareNote = el('p', 'muted share-note', t('tpl.shareOnly'));
+  shareNote.hidden = true;
+  templateBox.appendChild(shareNote);
   interface Thumb {
     template: Template;
     card: HTMLElement;
     open: HTMLButtonElement;
+    badge: HTMLElement;
     exp: HTMLButtonElement;
     custom: boolean;
     canvas: HTMLCanvasElement;
@@ -1214,6 +1218,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       const active = th.template.id === selectedTemplateId;
       th.card.classList.toggle('selected', active);
       th.open.setAttribute('aria-pressed', String(active));
+      th.badge.hidden = !active;
+      if (active) th.open.setAttribute('aria-current', 'true');
+      else th.open.removeAttribute('aria-current');
     }
   };
   const thumbErr = t('tpl.errThumb');
@@ -1224,10 +1231,12 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     ) ||
     (addedWidgets.get(id)?.length ?? 0) > 0 ||
     (removedWidgets.get(id)?.size ?? 0) > 0;
-  /** Builtins show export only once edited; customs always (export is their only save). */
+  /** Builtins enable export once edited (disabled + tooltip until then); customs always (export is their only save). */
   const syncExportBtns = (): void => {
     for (const th of thumbs) {
-      th.exp.hidden = !th.custom && !isEdited(th.template.id);
+      const locked = !th.custom && !isEdited(th.template.id);
+      th.exp.disabled = locked;
+      th.exp.title = locked ? t('tpl.exportDisabled') : t('tpl.exportTitle');
     }
   };
   /** Card corner button: titled + labelled, with an icon glyph or '×' text. */
@@ -1263,7 +1272,10 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const openBtn = el('button', 'template-open');
     openBtn.type = 'button';
     openBtn.setAttribute('aria-label', tpl.name);
-    openBtn.appendChild(thumbCanvas);
+    const badge = el('span', 'in-use', t('tpl.inUse'));
+    badge.hidden = true;
+    badge.setAttribute('aria-hidden', 'true');
+    openBtn.append(thumbCanvas, badge);
     const selectThis = (): void => {
       selectedTemplateId = tpl.id;
       syncCards();
@@ -1272,54 +1284,64 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const nameBtn = el('button', 'template-name', tpl.name);
     nameBtn.type = 'button';
     nameBtn.addEventListener('click', selectThis);
-    /** Customs rename inline (double-click): builtins are a fixed catalog. */
+    /** Customs rename inline (button or double-click): builtins are a fixed catalog. */
+    const startRename = (): void => {
+      if (!custom || nameBtn.isContentEditable) return;
+      nameBtn.contentEditable = 'true';
+      nameBtn.focus();
+      document.getSelection()?.selectAllChildren(nameBtn);
+      const commit = (save: boolean): void => {
+        nameBtn.contentEditable = 'false';
+        nameBtn.removeEventListener('blur', onBlur);
+        nameBtn.removeEventListener('keydown', onKey);
+        const next = (nameBtn.textContent ?? '').trim().slice(0, 60);
+        if (save && next && next !== tpl.name) {
+          tpl.name = next;
+          nameBtn.textContent = next;
+          openBtn.setAttribute('aria-label', next);
+          schedulePersist();
+          if (account && cloudIds.has(tpl.id)) {
+            void saveCloudTemplate(tpl.id, tpl.name, effectiveTemplate(tpl)).then((savedId) => {
+              if (!savedId) showToast(t('auth.errCloud'));
+            });
+          }
+        } else {
+          nameBtn.textContent = tpl.name;
+        }
+      };
+      const onBlur = (): void => commit(true);
+      const onKey = (ev: KeyboardEvent): void => {
+        if (ev.isComposing || ev.keyCode === 229) return;
+        // code fallback: some keyboards/automation emit no key (calibrated headless).
+        const k = ev.key || ev.code;
+        if (k === 'Enter') {
+          ev.preventDefault();
+          nameBtn.blur();
+        } else if (k === 'Escape') {
+          ev.preventDefault();
+          commit(false);
+        }
+      };
+      nameBtn.addEventListener('blur', onBlur);
+      nameBtn.addEventListener('keydown', onKey);
+    };
     if (custom) {
       nameBtn.title = t('tpl.renameTitle');
       nameBtn.addEventListener('dblclick', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (nameBtn.isContentEditable) return;
-        nameBtn.contentEditable = 'true';
-        nameBtn.focus();
-        document.getSelection()?.selectAllChildren(nameBtn);
-        const commit = (save: boolean): void => {
-          nameBtn.contentEditable = 'false';
-          nameBtn.removeEventListener('blur', onBlur);
-          nameBtn.removeEventListener('keydown', onKey);
-          const next = (nameBtn.textContent ?? '').trim().slice(0, 60);
-          if (save && next && next !== tpl.name) {
-            tpl.name = next;
-            nameBtn.textContent = next;
-            openBtn.setAttribute('aria-label', next);
-            schedulePersist();
-            if (account && cloudIds.has(tpl.id)) {
-              void saveCloudTemplate(tpl.id, tpl.name, effectiveTemplate(tpl)).then((savedId) => {
-                if (!savedId) showToast(t('auth.errCloud'));
-              });
-            }
-          } else {
-            nameBtn.textContent = tpl.name;
-          }
-        };
-        const onBlur = (): void => commit(true);
-        const onKey = (ev: KeyboardEvent): void => {
-          if (ev.isComposing || ev.keyCode === 229) return;
-          // code fallback: some keyboards/automation emit no key (calibrated headless).
-          const k = ev.key || ev.code;
-          if (k === 'Enter') {
-            ev.preventDefault();
-            nameBtn.blur();
-          } else if (k === 'Escape') {
-            ev.preventDefault();
-            commit(false);
-          }
-        };
-        nameBtn.addEventListener('blur', onBlur);
-        nameBtn.addEventListener('keydown', onKey);
+        startRename();
       });
+    } else {
+      nameBtn.title = tpl.name;
     }
     const foot = el('div', 'card-foot');
     foot.appendChild(nameBtn);
+    if (custom) {
+      foot.appendChild(
+        mkCardIconBtn('card-rename', t('tpl.rename'), t('tpl.rename'), 'icon-edit', startRename),
+      );
+    }
     const exportBtn = mkCardIconBtn('card-export', t('tpl.exportTitle'), t('tpl.export'), 'icon-download', () =>
       downloadTemplate(tpl),
     );
@@ -1341,16 +1363,18 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     if (tpl.id !== SHARE_TEMPLATE_ID) foot.appendChild(cardAiBtn);
     card.append(openBtn, foot);
     cardsBox.appendChild(card);
-    thumbs.push({
+    const thumb: Thumb = {
       template: tpl,
       card,
       open: openBtn,
+      badge,
       exp: exportBtn,
       custom,
       canvas: thumbCanvas,
       ctx: thumbCtx,
       sig: '',
-    });
+    };
+    thumbs.push(thumb);
     syncExportBtns();
     return card;
   };
@@ -1359,7 +1383,9 @@ export async function renderApp(root: HTMLElement): Promise<void> {
   newCard.type = 'button';
   newCard.title = t('tpl.newTitle');
   newCard.setAttribute('aria-label', t('tpl.newTitle'));
-  newCard.append(el('span', 'new-plus', '+'), el('span', 'template-name', t('tpl.new')));
+  const plus = el('span', 'new-plus', '+');
+  plus.appendChild(el('span', 'new-modes', t('tpl.newModes')));
+  newCard.append(plus, el('span', 'template-name', t('tpl.new')));
   cardsBox.appendChild(newCard);
   for (const tpl of allTemplates()) addCard(tpl);
   /** Image context shows only the share card; the share card hides everywhere else. */
@@ -1367,8 +1393,13 @@ export async function renderApp(root: HTMLElement): Promise<void> {
     const image = isImageCtx();
     for (const th of thumbs) th.card.hidden = image ? th.template.id !== SHARE_TEMPLATE_ID : th.template.id === SHARE_TEMPLATE_ID;
     newCard.hidden = image;
+    shareNote.hidden = !image;
   };
   syncCardGate();
+  /** Must match .template-thumb height in style.css. */
+  const THUMB_PX = 132;
+  /** Card chrome around the thumb: 16px horizontal padding + 4px border. */
+  const CARD_CHROME_PX = 20;
   /** Thumbnails mirror the loaded video's aspect so cards preview the real layout. */
   const sizeThumbs = (): void => {
     const dims =
@@ -1382,11 +1413,22 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       th.canvas.height = dims.h;
       th.sig = '';
     }
-    // "+" card matches a template card: 108px thumb height (style.css) + 16px padding + 4px border.
-    newCard.style.width = `${((108 * dims.w) / dims.h + 20).toFixed(1)}px`;
+    // "+" card matches a template card: thumb display width + card chrome.
+    newCard.style.width = `${((THUMB_PX * dims.w) / dims.h + CARD_CHROME_PX).toFixed(1)}px`;
+    cardsBox.classList.toggle('narrow-cards', thumbAspect !== 'horizontal');
+    syncStripFade();
   };
+  /** Edge fades track the strip's scroll position (4px slop for fractional widths). */
+  const syncStripFade = (): void => {
+    const max = cardsBox.scrollWidth - cardsBox.clientWidth;
+    cardsBox.classList.toggle('fade-l', cardsBox.scrollLeft > 4);
+    cardsBox.classList.toggle('fade-r', max > 4 && cardsBox.scrollLeft < max - 4);
+  };
+  cardsBox.addEventListener('scroll', syncStripFade, { passive: true });
+  window.addEventListener('resize', syncStripFade);
   sizeThumbs();
   templateBox.appendChild(cardsBox);
+  syncStripFade();
   // Vertical wheel over the strip scrolls it horizontally; page scroll resumes at the ends.
   cardsBox.addEventListener(
     'wheel',
@@ -2758,7 +2800,7 @@ export async function renderApp(root: HTMLElement): Promise<void> {
       const sig = `${th.template.id}|${units}|${thumbAspect}|${Math.floor(sample.t)}|${visKey}|${overrideRev}`;
       if (sig === th.sig) continue;
       th.sig = sig;
-      th.ctx.fillStyle = '#0d0d0d';
+      th.ctx.fillStyle = '#101010'; // --ink: matches .template-thumb (canvas can't read CSS vars cheaply)
       th.ctx.fillRect(0, 0, th.canvas.width, th.canvas.height);
       // Share cards preview the finished frame (progress 1).
       const shareCtx =
